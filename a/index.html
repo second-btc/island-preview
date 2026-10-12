@@ -4,20 +4,20 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>아일랜드</title>
-  <meta name="description" content="정체불명의 바이러스가 모든 대륙을 삼켰습니다. 바다 한가운데 남은 단 하나의 섬, 땅은 150필지뿐. 깃발을 꽂은 사람만 이 섬에 남을 수 있습니다.">
+  <meta name="description" content="정체불명의 바이러스가 모든 대륙을 삼켰습니다. 바다 한가운데 남은 단 하나의 섬, 땅은 600구획뿐. 깃발을 꽂은 사람만 이 섬에 남을 수 있습니다.">
   <meta name="theme-color" content="#070b1c">
   <meta property="og:type" content="website">
   <meta property="og:locale" content="ko_KR">
   <meta property="og:title" content="ISLAND — 마지막 섬">
-  <meta property="og:description" content="정체불명의 바이러스가 모든 대륙을 삼켰습니다. 바다 한가운데 남은 단 하나의 섬, 땅은 150필지뿐. 깃발을 꽂은 사람만 이 섬에 남을 수 있습니다.">
+  <meta property="og:description" content="정체불명의 바이러스가 모든 대륙을 삼켰습니다. 바다 한가운데 남은 단 하나의 섬, 땅은 600구획뿐. 깃발을 꽂은 사람만 이 섬에 남을 수 있습니다.">
   <meta name="twitter:card" content="summary">
   <meta name="twitter:title" content="ISLAND — 마지막 섬">
-  <meta name="twitter:description" content="정체불명의 바이러스가 모든 대륙을 삼켰습니다. 바다 한가운데 남은 단 하나의 섬, 땅은 150필지뿐. 깃발을 꽂은 사람만 이 섬에 남을 수 있습니다.">
+  <meta name="twitter:description" content="정체불명의 바이러스가 모든 대륙을 삼켰습니다. 바다 한가운데 남은 단 하나의 섬, 땅은 600구획뿐. 깃발을 꽂은 사람만 이 섬에 남을 수 있습니다.">
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23070b1c'/%3E%3Ccircle cx='44' cy='20' r='8' fill='%23ffd76a'/%3E%3Cpath d='M8 46c7-11 17-15 25-13s14 6 23 13z' fill='%235fbf6b'/%3E%3Cpath d='M30 33V17l9 4-9 4' fill='none' stroke='%23ffd76a' stroke-width='3' stroke-linejoin='round'/%3E%3Cpath d='M6 51h52' stroke='%2338b6c9' stroke-width='4' stroke-linecap='round'/%3E%3C/svg%3E">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@700;900&family=Noto+Sans+KR:wght@400;500;700;900&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="style.css?v=142">
+  <link rel="stylesheet" href="style.css?v=165">
 </head>
 <body>
   <!-- 3D 섬 (표지·게임 공용) -->
@@ -33,7 +33,7 @@
       <div class="story">
         <p>정체불명의 바이러스가 모든 대륙을 삼켰습니다.</p>
         <p>바다 한가운데, 바이러스가 닿지 않은 섬이 <b>단 하나</b> 남았습니다.</p>
-        <p>땅은 <b>150필지</b>뿐. 깃발을 꽂은 사람만 이 섬에 남을 수 있습니다.</p>
+        <p>땅은 <b>600구획</b>뿐. 깃발을 꽂은 사람만 이 섬에 남을 수 있습니다.</p>
       </div>
       <p class="tagline">섬의 땅 아래엔 새 문명을 세울 <b>💎 토큰 1,000,000개</b>가 잠들어 있습니다</p>
     </div>
@@ -51,6 +51,8 @@
 
   <!-- 게임 UI (3D 위에 떠 있는 유리 카드) -->
   <div class="hud" id="game" hidden>
+    <!-- 지도에서 누른 자리: 그곳으로 낙하 (상단바·카드보다 아래에 깔리게 맨 앞) -->
+    <div class="drop-pin" id="dropPin" hidden><button class="btn primary" id="btnDrop">🪂 여기로 내려가기</button><i class="drop-stem" aria-hidden="true"></i></div>
     <header class="topbar glass">
       <button class="brand" id="brand" title="표지로">ISLAND</button>
       <div class="meter">
@@ -59,7 +61,7 @@
       </div>
       <div class="pill"><span class="ico">💎</span><b id="hudTokens">0</b></div>
       <div class="pill" title="내 땅"><span class="ico">🏡</span><b id="hudPlots">0</b></div>
-      <div class="pill flags" title="정착 깃발: 땅 1필지에 1개. 구조선이 4시간마다 1개씩 실어 와요"><span class="flagset" id="hudFlags"></span><small id="hudFlagNext"></small></div>
+      <div class="pill flags" title="정착 깃발: 땅 1구획에 1개. 구조선이 4시간마다 1개씩 실어 와요"><span class="flagset" id="hudFlags"></span><small id="hudFlagNext"></small></div>
       <button class="patrol" id="btnPatrol" hidden title="내 땅 전부의 보호 시간을 다시 채워요">🔥 순찰</button>
       <div class="pill time" id="hudTime" title="게임 속 하루는 실제 48분"></div>
       <button class="walkbtn" id="btnWalk">🚶 섬 걷기</button>
@@ -83,10 +85,10 @@
       <span class="kc-pc"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> 이동</span>
       <span class="kc-pc"><kbd>마우스</kbd> 시점</span>
       <span class="kc-pc"><kbd>Space</kbd> 점프</span>
-      <span class="kc-pc"><kbd>Shift</kbd> 걷기</span>
+      <span class="kc-pc"><kbd>Shift</kbd> 달리기</span>
       <span class="kc-pc"><kbd>E</kbd> 깃발</span>
       <span class="kc-pc"><kbd>Esc</kbd> 마우스 풀기</span>
-      <span class="kc-mo">왼쪽 끌기 이동 · 오른쪽 끌기 둘러보기</span>
+      <span class="kc-mo">왼쪽 끌기 이동(멀리 끌면 달리기) · 오른쪽 끌기 둘러보기</span>
     </div>
     <button class="jumpbtn" id="btnJump" aria-label="점프">점프</button>
     <div class="dock glass walk-hud" id="walkHud"></div>
@@ -104,22 +106,23 @@
   <script src="https://cdn.jsdelivr.net/npm/three@0.147.0/examples/js/loaders/GLTFLoader.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/three@0.147.0/examples/js/utils/SkeletonUtils.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/three@0.147.0/examples/js/loaders/RGBELoader.js"></script>
-  <script src="js/config.js?v=142"></script>
-  <script src="js/rng.js?v=142"></script>
-  <script src="js/island.js?v=142"></script>
-  <script src="js/difficulty.js?v=142"></script>
-  <script src="js/quests/registry.js?v=142"></script>
-  <script src="js/quests/timing.js?v=142"></script>
-  <script src="js/quests/memory.js?v=142"></script>
-  <script src="js/quests/spores.js?v=142"></script>
-  <script src="js/quests/probe.js?v=142"></script>
+  <script src="js/config.js?v=165"></script>
+  <script src="js/rng.js?v=165"></script>
+  <script src="js/island.js?v=165"></script>
+  <script src="js/difficulty.js?v=165"></script>
+  <script src="js/quests/registry.js?v=165"></script>
+  <script src="js/quests/timing.js?v=165"></script>
+  <script src="js/quests/memory.js?v=165"></script>
+  <script src="js/quests/spores.js?v=165"></script>
+  <script src="js/quests/probe.js?v=165"></script>
   <!-- 장부 맞추기(js/quests/ledger.js)는 회계 용어가 어려워 꺼둠 -->
-  <script src="js/mining.js?v=142"></script>
-  <script src="js/rivals.js?v=142"></script>
-  <script src="js/guard.js?v=142"></script>
-  <script src="js/state.js?v=142"></script>
-  <script src="js/real.js?v=142"></script>
-  <script src="js/world.js?v=142"></script>
-  <script src="js/main.js?v=142"></script>
+  <script src="js/mining.js?v=165"></script>
+  <script src="js/rivals.js?v=165"></script>
+  <script src="js/guard.js?v=165"></script>
+  <script src="js/state.js?v=165"></script>
+  <script src="js/net.js?v=165"></script>
+  <script src="js/real.js?v=165"></script>
+  <script src="js/world.js?v=165"></script>
+  <script src="js/main.js?v=165"></script>
 </body>
 </html>

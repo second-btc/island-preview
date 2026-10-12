@@ -9,9 +9,12 @@
   const FG = GW * R + 1;                             // 세밀 격자 점 수
   const STEP = S / R;
   const ORIGIN = -HALF - M * S;
+  const LS = C.LOT_SPLIT || 1, LOT = S / LS; // 구획: 칸 하나를 LS×LS로 나눈 소유 단위 (한 변 LOT)
   const SIZE = GW * S;
   const LAND_H = { beach: 0.4, forest: 0.75, mountain: 1.4 };
-  const EYE = 0.38, WALK = 0.75, RUN = 2.4, BODY_H = 0.44;
+  const EYE = 0.38, WALK = 0.75, RUN = 2.4, SPRINT = 4.2, BODY_H = 0.44;
+  // 지도에서 고른 곳으로 낙하: 시작 높이, 최고 낙하 속도 (공기 저항)
+  const DROP_H = 11, DROP_VT = 7.5, ROLL_T = 1.15; // ROLL_T: 착지 구르기 (동작이 다시 일어서는 데 약 1.2초)
   const POLLUTION_R = 205;    // 이 거리 밖은 바이러스에 오염된 바다 (들어갈 수 없음)
   const WATER_STOP = -99;     // 바다도 헤엄쳐 다닐 수 있다 (오염 해역 전까지)
 
@@ -26,7 +29,8 @@
   const DAY = PALETTE.game;
   const DAWN = { ...DAY, top: '#2c3f78', mid: '#b98fae', hor: '#ffc8a2', sun: '#ffd2a0', sunDir: [-0.8, 0.1, 0.55], hemiSky: '#ffd6c0', hemiGround: '#4a3a40', hemi: 0.4, key: 1.3, keyCol: '#ffc9a0', keyPos: [-95, 18, 62], deep: '#0f3f72', sea2: '#2a8fa6', shallow: '#8bd0c4', stars: 0.15, exposure: 1.0, env: 1 };
   const DUSK = { ...DAY, top: '#24386f', mid: '#d48468', hor: '#ffad6a', sun: '#ffb062', sunDir: [0.82, 0.07, -0.57], hemiSky: '#ffc49c', hemiGround: '#503828', hemi: 0.42, key: 1.5, keyCol: '#ffaa70', keyPos: [95, 14, -62], deep: '#123b6a', sea2: '#2a879a', shallow: '#7cc2b4', stars: 0.05, exposure: 1.0, env: 1 };
-  const NIGHT = { ...DAY, top: '#030817', mid: '#0b1835', hor: '#1b3056', sun: '#c4d2ff', sunDir: [-0.4, 0.45, 0.6], hemiSky: '#5a74b8', hemiGround: '#141a2c', hemi: 0.62, key: 0.75, keyCol: '#a8bbff', keyPos: [-55, 75, 65], deep: '#03122a', sea2: '#0c3550', shallow: '#2b6670', stars: 1, exposure: 0.95, env: 0 };
+  // 밤: 달빛은 낮 햇빛의 1/3쯤, 그늘은 하늘빛 환경광으로 (전엔 달빛 0.75+환경광 0.62에 노출 0.95라 회백색 낮처럼 뜨고 그늘만 새까맸다)
+  const NIGHT = { ...DAY, top: '#030817', mid: '#0b1835', hor: '#1b3056', sun: '#8fa3dd', sunDir: [-0.4, 0.45, 0.6], hemiSky: '#4e6aa8', hemiGround: '#1c2440', hemi: 0.58, key: 0.62, keyCol: '#a8bbff', keyPos: [-55, 75, 65], deep: '#03122a', sea2: '#0c3550', shallow: '#2b6670', stars: 1, exposure: 0.82, env: 0 };
   // 하루 = 실제 48분: 낮 약 26분 · 노을 약 6분 · 밤 약 10분 (밤이 너무 길면 처음 온 사람이 어두운 섬만 본다)
   const DAY_KEYS = [[0, DAWN], [0.05, DAY], [0.6, DAY], [0.68, DUSK], [0.74, NIGHT], [0.93, NIGHT], [1, DAWN]];
   const DAY_LEN_MS = 48 * 60 * 1000;
@@ -92,9 +96,9 @@
   let mode = 'hero', curPal = null, cam = { ...CAM.hero }, theta = 0.5, userTheta = 0, userTilt = 0, userZoom = 0;
   let trans = null, tween = null, selId = null, hoverId = null, dbgCam = null;
   let onPick = null, onHover = null, onWalkPlot = null, onInteract = null, inputOn = true;
-  const player = { x: 0, z: 0, yaw: 0, pitch: -0.05, bob: 0, plotId: null, face: 0, moving: 0, walk: false, jy: 0, vy: 0, air: false, land: 0 };
+  const player = { x: 0, z: 0, yaw: 0, pitch: -0.05, bob: 0, plotId: null, face: 0, moving: 0, walk: false, sprint: false, jy: 0, vy: 0, air: false, land: 0, drop: false, tilt: 0, roll: 0 };
   const JUMP_V = 2.75, GRAVITY = 10;
-  const keys = {}, joy = { x: 0, y: 0 };
+  const keys = {}, joy = { x: 0, y: 0, far: false }; // far: 모바일에서 멀리 끌면 달리기
   const clock = new T.Clock();
   const RL = () => (I.real && I.real.R.ready ? I.real.R : null);
   let hero = null; // 3인칭 캐릭터
@@ -240,8 +244,12 @@
           }
           if (d < BR + 6) {
             const front = ss(-0.1 * BR, 0.55 * BR, (x - cx) * fx + (z - cz) * fz);
-            const bowl = bottom - 0.9 * (1 - Math.min(1, d / (BR + 1.6))) ** 2;
-            F[k] = Math.min(F[k], bowl + (F[k] - bowl) * ss(BR + 1.6 - front, BR + 2.4 + front * 2.5, d));
+            // 소 가장자리는 둥근 원이 아니라 조금 울퉁불퉁하게 (쿠키 커터로 찍은 듯 보이지 않게). 앞(강 출구) 쪽은 그대로
+            const phi0 = Math.atan2((x - cx) * -fz + (z - cz) * fx, -((x - cx) * fx + (z - cz) * fz));
+            const dn = d / (1 + (vnoise(phi0 * 1.4 + 9, 3.7, sd + 401) - 0.5) * 0.18 * (1 - front));
+            // 바닥은 2m 가까이 깊은 그릇: 얕으면 물이 필름처럼 비쳐 땅 무늬가 보였다
+            const bowl = bottom - 1.7 * (1 - Math.min(1, dn / (BR + 1.6))) ** 2;
+            F[k] = Math.min(F[k], bowl + (F[k] - bowl) * ss(BR + 1.6 - front, BR + 2.4 + front * 2.5, dn));
             // 앞쪽은 낮은 바위 둑으로 물을 가둔다 (하류로 빠지는 물길만 낮게)
             if (front > 0.2 && d > BR + 0.4) {
               let rd = 1e9;
@@ -281,28 +289,51 @@
         let s0 = 0;
         while (s0 < Ltot && vd2(at(s0).x, at(s0).z) < CR + 0.9) s0 += 0.1;
         pools.push({ a: 0, b: s0, L: lakeLv });
-        // 연속 급류 하나: 호수 출구에서 바위턱까지 웅덩이 없이 바위를 타고 내려온다.
-        // 수면은 양옆 둑(앞뒤로 고르게 편 높이)보다 0.95~1.5 아래 = 얕은 골짜기 속 물길. 하류로 늘 내려가고(최소 기울기 0.1),
-        // 둑 모양을 따라 가파른 곳(하얗게 부서짐)과 덜 가파른 곳(물빛 비침)이 번갈아 나온다.
-        // (예전엔 평평한 웅덩이를 계단처럼 쌓아, 폭포보다 물웅덩이가 줄지어 있는 것처럼 보였다)
+        // 계단식: 호수 출구에서 한 번 쏟아진 뒤(백록담 넘침) 완만한 여울이 흐르다, 산비탈이 급히 낮아지는 곳마다 턱에서 떨어진다.
+        // 여울은 양옆 둑보다 0.9 이상 낮게(협곡 속) 약 14°로 내려가고, 둑이 여울보다 빨리 낮아져 물이 둑 위로 떠오르려 하면 그 자리에 낙하(1.5m 이상)를 만든다.
+        // 마지막은 큰 폭포 위 작은 소(둥근 웅덩이)에 떨어져 바위턱으로 흘러간다.
+        // (예전엔 ①평평한 웅덩이 계단 → '물웅덩이만 많다', ②웅덩이 없는 급류 띠 하나 → '물이 굵고 알차게 떨어지는 느낌이 없다')
         const bankS = (q) => { let m = 0; for (let d = -1; d <= 1.01; d += 0.5) m += bankAt(Math.max(0, Math.min(Ltot, q + d))); return m / 5; };
-        pools.push({ a: s0, b: Ltot, L: lakeLv, cascade: true });
-        pools.forEach((p, k) => { p.ww = k === 0 ? 0.72 + hash(k, 78, sd) * 0.32 : 0.82 + hash(k, 78, sd) * 0.18; });
-        // 단면 표본: 0.2 간격. 수면 L은 표본마다 (호수 출구 = 호수 높이)
+        const cap = (q) => bankS(q) - 0.9, LP = 3.0, SC = 0.24, DIG = 1.6, endL = shelfL + 0.12, qEnd = Ltot - LP;
+        pools[0].ww = 0.72 + hash(0, 78, sd) * 0.32;
         const samples = [];
         {
           const p0 = pools[0], n0 = Math.max(3, Math.ceil((p0.b - p0.a) / 0.2));
           for (let i = 0; i <= n0; i++) { const u = i / n0, q = p0.a + (p0.b - p0.a) * u; samples.push({ ...at(q), s: q, k: 0, u, L: lakeLv, ww: p0.ww, depth: (0.08 + 0.34 * (1 - ss(0.35, 0.97, u))) * 0.8 }); }
-          const p1 = pools[1], n1 = Math.max(3, Math.ceil((p1.b - p1.a) / 0.2)), endL = shelfL + 0.12;
-          let lastL = lakeLv - 0.04;
-          for (let i = 0; i <= n1; i++) {
-            const u = i / n1, q = p1.a + (p1.b - p1.a) * u + (i === 0 ? 0.05 : 0);
-            const g = 0.95 + 0.55 * vnoise(q * 0.35, 3.7, sd + 77);
-            let L = i === 0 ? lastL : Math.min(lastL - 0.02, bankS(q) - g);
-            L = Math.max(L, endL + (Ltot - q) * 0.1); // 바위턱까지 늘 내려가는 바닥선 (바위턱보다 낮아지지 않게)
-            lastL = L;
-            samples.push({ ...at(q), s: q, k: 1, u, L, ww: p1.ww, depth: 0.12 + 0.08 * vnoise(q * 0.6, 1.3, sd + 79) });
+        }
+        {
+          let q = s0, L = lakeLv - 0.04, chute = 0, seg = null;
+          // 턱마다 물이 한쪽 홈(노치)으로 모여 떨어진다 (여울 폭 그대로 떨어지면 사람이 만든 보처럼 보인다)
+          const open = (Lstart) => { const ww = 0.82 + hash(pools.length, 78, sd) * 0.18; seg = { a: q, L: Lstart, cascade: true, ww, nh: ww * 0.7, nc: (hash(pools.length, 79, sd) - 0.5) * 0.4 * ww, pts: [] }; pools.push(seg); L = Lstart; chute = 0; };
+          // 첫 낙하: 호수 출구에서 바로 (2.2m 이상, 둑 아래 깊숙이)
+          open(Math.min(L - 2.2, cap(q + 0.6) - DIG));
+          seg.pts.push({ q: q + 0.05, L });
+          while (q + 0.2 < qEnd - 0.4) {
+            q += 0.2; chute += 0.2;
+            const ideal = seg.L - SC * (q - seg.a), cp = cap(q);
+            // 여울의 이상선(일정 기울기)이 둑보다 빨리 못 내려가 둑 위로 떠오르려 하면 → 그 자리에 턱을 만들어 둑 아래 깊숙이 떨어진다
+            const deficit = ideal - cp;
+            if (q < qEnd - 3.0 && chute > 1.6 && deficit > 1.0) {
+              seg.b = q;
+              open(Math.min(L - 1.5, cp - DIG));
+              seg.pts.push({ q: q + 0.05, L });
+              continue;
+            }
+            L = Math.max(Math.min(ideal, cp + 0.45), endL + 1.2); // 둑 위로는 못 떠오르고, 마지막 소보다 1.2 위에서 끝난다 (마지막 낙하)
+            seg.pts.push({ q, L });
           }
+          seg.b = q;
+          pools.forEach((p, k) => {
+            if (!p.pts) return;
+            const n = p.pts.length;
+            p.pts.forEach((pt, j) => samples.push({ ...at(pt.q), s: pt.q, k, u: n > 1 ? j / (n - 1) : 0, L: pt.L, ww: p.ww, depth: 0.14 + 0.1 * vnoise(pt.q * 0.6, 1.3, sd + 79) }));
+            delete p.pts;
+          });
+          // 큰 폭포 위 작은 소 (둥근 웅덩이)
+          const pl = { a: q, b: Ltot, L: endL, ww: 1.15 };
+          pools.push(pl);
+          const kl = pools.length - 1, nl = Math.max(3, Math.ceil((pl.b - pl.a) / 0.2));
+          for (let j = 0; j <= nl; j++) { const u = j / nl, qq = pl.a + (pl.b - pl.a) * u + (j === 0 ? 0.05 : 0); samples.push({ ...at(qq), s: qq, k: kl, u, L: endL, ww: pl.ww, depth: 0.3 + 0.25 * (1 - ss(0.5, 1, u)) }); }
         }
         // 곡률(+면 법선 n 쪽으로 휜다): 굽이 안쪽은 협곡 단면을 줄여 서로 접히지 않게
         for (const sm of samples) { const a = at(sm.s - 0.4), b = at(sm.s + 0.4); sm.kap = Math.asin(Math.max(-1, Math.min(1, a.tx * b.tz - a.tz * b.tx))) / 0.8; }
@@ -397,12 +428,23 @@
     return n < 0.42 ? 'meadow' : n > 0.57 ? 'jungle' : 'wood';
   }
 
+  // 구획 가운데 (q 없는 칸 객체면 칸 가운데)
   function cellCenter(p) {
-    return { x: ORIGIN + (p.x + M) * S + S / 2, z: ORIGIN + (p.y + M) * S + S / 2 };
+    const ox = p.q === undefined ? S / 2 : ((p.q % LS) + 0.5) * LOT, oz = p.q === undefined ? S / 2 : (Math.floor(p.q / LS) + 0.5) * LOT;
+    return { x: ORIGIN + (p.x + M) * S + ox, z: ORIGIN + (p.y + M) * S + oz };
   }
+  let lotIndex = null, lotIndexOf = null;
   function plotAt(x, z) {
-    const cx = Math.floor((x - ORIGIN) / S) - M, cy = Math.floor((z - ORIGIN) / S) - M;
-    return plots.find((p) => p.x === cx && p.y === cy) || null;
+    if (lotIndexOf !== plots) { lotIndex = new Map(plots.map((p) => [p.x + ',' + p.y + ',' + (p.q || 0), p])); lotIndexOf = plots; }
+    const gx = (x - ORIGIN) / S - M, gz = (z - ORIGIN) / S - M, cx = Math.floor(gx), cy = Math.floor(gz);
+    const q = Math.min(LS - 1, Math.floor((gx - cx) * LS)) + LS * Math.min(LS - 1, Math.floor((gz - cy) * LS));
+    return lotIndex.get(cx + ',' + cy + ',' + q) || null;
+  }
+  // 섬 지형 칸 (식생 등 칸 단위로 흩뿌리는 것용). 칸 번호는 분할 전 필지 번호와 같아 식생 배치가 그대로다
+  function cellsOf(ps) {
+    const m = new Map();
+    for (const p of ps) if (!m.has(p.cell || p.id)) m.set(p.cell || p.id, { id: p.cell || p.id, x: p.x, y: p.y, terrain: p.terrain });
+    return [...m.values()];
   }
 
   function buildTerrain() {
@@ -466,7 +508,7 @@
           .replace('#include <common>', '#include <common>\nvarying vec3 vWP, vWN;')
           .replace('#include <begin_vertex>', '#include <begin_vertex>\nvBlend = aBlend; vTUv = uv; vWP = (modelMatrix * vec4(position, 1.0)).xyz; vWN = normalize(mat3(modelMatrix) * normal);');
         sh.fragmentShader = sh.fragmentShader
-          .replace('#include <common>', '#include <common>\nuniform sampler2D tSand, tGrass, tJungle, tRock; varying vec4 vBlend; varying vec2 vTUv; varying vec3 vWP, vWN;\nvec3 tri(sampler2D t, float k){ vec3 w = pow(abs(vWN), vec3(4.0)); w /= (w.x + w.y + w.z); return texture2D(t, vWP.zy * k).rgb * w.x + texture2D(t, vWP.xz * k).rgb * w.y + texture2D(t, vWP.xy * k).rgb * w.z; }')
+          .replace('#include <common>', '#include <common>\nuniform sampler2D tSand, tGrass, tJungle, tRock; varying vec4 vBlend; varying vec2 vTUv; varying vec3 vWP, vWN;\nfloat tnoise(vec2 p){ vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f); float a = fract(sin(dot(i, vec2(127.1, 311.7))) * 43758.5453), b = fract(sin(dot(i + vec2(1.0, 0.0), vec2(127.1, 311.7))) * 43758.5453), c = fract(sin(dot(i + vec2(0.0, 1.0), vec2(127.1, 311.7))) * 43758.5453), d = fract(sin(dot(i + vec2(1.0, 1.0), vec2(127.1, 311.7))) * 43758.5453); return mix(mix(a, b, f.x), mix(c, d, f.x), f.y); }\nvec3 tri(sampler2D t, float k){ vec3 w = pow(abs(vWN), vec3(4.0)); w /= (w.x + w.y + w.z); return texture2D(t, vWP.zy * k).rgb * w.x + texture2D(t, vWP.xz * k).rgb * w.y + texture2D(t, vWP.xy * k).rgb * w.z; }')
           .replace('#include <map_fragment>', `
             // 가까운 무늬와 먼 무늬를 섞어 타일 반복이 덜 보이게
             vec3 sA = texture2D(tSand, vTUv).rgb, sB = texture2D(tSand, vTUv * 0.23).rgb;
@@ -477,11 +519,27 @@
             float gl = dot(mix(gA, gB, 0.4), vec3(0.3, 0.59, 0.11)) * 1.9;
             float gv = smoothstep(0.25, 0.75, dot(gB, vec3(0.3, 0.59, 0.11)) * 2.0);
             vec3 grass = mix(vec3(0.16, 0.36, 0.09), vec3(0.36, 0.56, 0.16), gv) * gl;
+            // 풀밭 얼룩: 큰 결로 마른 풀(누런)·짙은 풀(그늘진 초록) 패치 + 잔 결 (한 가지 초록이 번진 듯한 밋밋함을 깬다)
+            float pa = tnoise(vWP.xz * 0.035), pb = tnoise(vWP.xz * 0.11 + 17.0), pc = tnoise(vWP.xz * 0.6 + 3.0);
+            grass = mix(grass, grass * vec3(1.35, 1.18, 0.62), smoothstep(0.58, 0.8, pa) * 0.75);   // 마른 풀
+            grass = mix(grass, grass * vec3(0.62, 0.78, 0.6), smoothstep(0.45, 0.2, pb) * 0.6);     // 짙고 축축한 풀
+            grass *= 0.9 + 0.2 * pc;
             float jl = dot(mix(jA, jB, 0.4), vec3(0.3, 0.59, 0.11)) * 2.0;
             vec3 jungle = mix(vec3(0.10, 0.22, 0.07), vec3(0.24, 0.24, 0.12), smoothstep(0.3, 0.7, jl * 0.5)) * jl;
             vec3 rock = mix(tri(tRock, 0.13), tri(tRock, 0.03), 0.5) * vec3(0.78, 0.76, 0.74);
-            float slopeRock = smoothstep(0.8, 0.6, normalize(vWN).y) * smoothstep(1.0, 2.2, vWP.y);
+            // 화산 바위: 층층이 쌓인 지층 띠 + 빗물에 패인 세로 골 (민둥 원뿔처럼 보이지 않게)
+            float strata = sin(vWP.y * 2.6 + tnoise(vWP.xz * 0.15) * 5.0);
+            rock *= 0.55 + 0.45 * smoothstep(-0.3, 0.3, strata); // 또렷한 층 경계
+            rock *= mix(1.0, 0.72, smoothstep(0.62, 0.85, tnoise(vec2(atan(vWP.z, vWP.x) * 9.0, vWP.y * 0.12))) * smoothstep(3.0, 8.0, vWP.y));
+            // 색은 텍스처에 곱해 질감을 살린다 (선형 공간이라 고정색을 넣으면 분홍빛으로 뜬다)
+            rock *= mix(vec3(1.0), vec3(0.5, 0.48, 0.47), smoothstep(6.0, 12.0, vWP.y));   // 중턱: 짙은 현무암
+            rock *= mix(vec3(1.0), vec3(1.25, 0.72, 0.52), smoothstep(14.0, 20.0, vWP.y)); // 정상: 붉은 화산재
+            float slopeRock = max(smoothstep(0.8, 0.6, normalize(vWN).y) * smoothstep(1.0, 2.2, vWP.y), smoothstep(12.0, 15.0, vWP.y + tnoise(vWP.xz * 0.2) * 2.0)); // 높은 곳은 경사와 무관하게 바위
             vec4 bl = mix(vBlend, vec4(0.0, 0.0, 0.0, 1.0), slopeRock);
+            // 물가 젖은 모래: 해수면 바로 위 띠가 어둡고 촉촉하게 + 그 위 마른 모래에 잔물결 자국
+            float wet = 1.0 - smoothstep(0.05, 0.34, vWP.y);
+            sand = mix(sand, sand * vec3(0.62, 0.6, 0.58), wet * 0.85);
+            sand *= 0.93 + 0.1 * tnoise(vec2(vWP.x * 0.9 + sin(vWP.z * 0.7) * 2.0, vWP.z * 0.25));
             diffuseColor.rgb *= sand * bl.x + grass * bl.y + jungle * bl.z + rock * bl.w;`);
       };
     }
@@ -584,11 +642,11 @@
       fragmentShader: `uniform float uTime; uniform sampler2D uNormals, uStreak; uniform vec3 uSky, uSea, uDark, uLight; varying vec2 vUv; varying float vFall, vDepth, vIn, vMouth; varying vec3 vW;
         ${DEPTH_GLSL}
         void main(){
-          float speed = mix(0.35, 2.4, vFall);
-          vec3 n = texture2D(uNormals, vec2(vUv.x * 0.8, vUv.y - uTime * speed)).rgb * 2.0 - 1.0;
+          float speed = mix(0.35, 2.4, vFall), nsp = min(speed, 0.45); // 노멀맵은 느리게 (빠르면 거꾸로 기는 착시)
+          vec3 n = texture2D(uNormals, vec2(vUv.x * 0.8, vUv.y - uTime * nsp)).rgb * 2.0 - 1.0;
           vec4 st = texture2D(uStreak, vec2(vUv.x * 1.6, vUv.y * 0.9 - uTime * speed * 0.35));
-          vec4 st2 = texture2D(uStreak, vec2(vUv.x * 2.8 + 0.37, vUv.y * 1.6 - uTime * speed * 0.5));
-          vec3 n2 = texture2D(uNormals, vec2(vUv.x * 2.2 + 0.3, vUv.y * 2.0 - uTime * speed * 1.3)).rgb * 2.0 - 1.0;
+          vec4 st2 = texture2D(uStreak, vec2(vUv.x * 2.8 + 0.37, vUv.y * 0.6 - uTime * speed * 0.19));
+          vec3 n2 = texture2D(uNormals, vec2(vUv.x * 2.2 + 0.3, vUv.y * 2.0 - uTime * nsp * 1.3)).rgb * 2.0 - 1.0;
           // 수심: 깊을수록 진한 청록, 얕은 물가는 바닥이 비치며 사라진다
           float deep = smoothstep(0.05, 0.6, vDepth);
           vec3 V = normalize(cameraPosition - vW);
@@ -623,11 +681,12 @@
     const mat = new T.ShaderMaterial({
       transparent: true, depthWrite: false, side: T.DoubleSide,
       uniforms: { uTime: waterMat.uniforms.uTime, uLight: fallLight },
-      vertexShader: 'varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }',
-      fragmentShader: `uniform float uTime; uniform vec3 uLight; varying vec2 vUv;
+      vertexShader: 'varying vec2 vUv; varying vec3 vWm; void main(){ vUv = uv; vWm = (modelMatrix * vec4(position,1.0)).xyz; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }',
+      fragmentShader: `uniform float uTime; uniform vec3 uLight; varying vec2 vUv; varying vec3 vWm;
         void main(){
-          float n = sin(vUv.x * 140.0 + uTime * 0.4) * 0.5 + sin(vUv.x * 57.0 - uTime * 0.25 + vUv.y * 3.0) * 0.5;
+          float n = sin(vUv.x * 138.23 + uTime * 0.4) * 0.5 + sin(vUv.x * 56.549 - uTime * 0.25 + vUv.y * 3.0) * 0.5; // 2π의 정수배: 원통 이음매에서 무늬가 끊기지 않게
           float a = (1.0 - vUv.y) * (0.22 + n * 0.06) * smoothstep(0.0, 0.08, vUv.y + 0.02);
+          a *= 1.0 - smoothstep(50.0, 150.0, length(vWm.xz - cameraPosition.xz)); // 경계 가까이 가야만 보인다 (멀리선 수평선에 칙칙한 띠로만 읽힘)
           gl_FragColor = vec4(mix(vec3(0.4, 0.34, 0.46), vec3(0.32, 0.38, 0.3), 0.5 + n * 0.3) * min(vec3(1.0), uLight * 1.1), a); // 멍든 보라 띠처럼 안 보이게 회색 섞인 안개 · 밤엔 어둡게
           #include <encodings_fragment>
         }`,
@@ -639,8 +698,8 @@
 
   // ---------- 폭포 ----------
   // ---------- 폭포: 첫 화면의 주인공 ----------
-  let fallGrp = null, fallFx = null, fallAudio = null, fallMuted = false, fallWallMat = null, gestured = false;
-  const fallLight = { value: new T.Color(1, 1, 1) };
+  let fallGrp = null, fallFx = null, fallAudio = null, fallMuted = false, fallWallMat = null, gestured = false, rockMats = [];
+  const fallLight = { value: new T.Color(1, 1, 1) }, fallSun = { value: new T.Vector3(0.5, 0.6, -0.6) }; // 물빛·해 방향 (모든 물기둥이 공유)
   // ---- 후처리: 블룸(밝은 곳이 은은히 번짐) + 색보정 ----
   // r147은 렌더 타깃에 그릴 때도 톤매핑은 하고 sRGB 변환만 빼므로, 장면을 선형으로 받아 마지막에 sRGB로 바꾼다
   const LINPOW = { value: 1.0 }; // 화면 색으로 직접 쓴 발광 셰이더 보정용 (후처리 켜지면 2.2)
@@ -835,9 +894,14 @@
             alpha = smoothstep(0.0, 0.3, e) * mix(0.8, 0.97, crest) * smoothstep(0.25, 0.2, s);
           } else {
             float st = pow(t, 0.62);
+            // 시간 주파수 주의: 한 지점을 지나는 무늬가 초당 4주기를 넘으면 25fps에선 거꾸로(위로) 흐르는 듯 보인다(수레바퀴 착시)
+            // → 고운 파란 채널(세로 9주기)은 넓게 당겨 쓰고, 세 층은 같은 속도로(층 사이 맥놀이 방지)
             vec4 A = texture2D(uTex, vec2(x * uW * 0.2 + uSeed, st * uH * 0.075 - uTime * 0.8 * uSpeed));
-            vec4 B = texture2D(uTex, vec2(x * uW * 0.37 + uSeed * 1.7, st * uH * 0.13 - uTime * 1.3 * uSpeed));
-            float streak = A.r * 0.6 + B.g * 0.5;
+            vec4 B = texture2D(uTex, vec2(x * uW * 0.37 + uSeed * 1.7, st * uH * 0.1 - uTime * 1.0 * uSpeed));
+            // 물덩이: 줄무늬는 세로로 길어 흘러도 안 흐르는 듯 보인다 → 큰 덩어리가 또렷이 떨어지게 (초당 3주기)
+            vec4 Cc = texture2D(uTex, vec2(x * uW * 0.12 + uSeed * 0.6, st * uH * 0.03 - uTime * 0.33 * uSpeed));
+            float clump = Cc.b;
+            float streak = (A.r * 0.6 + B.g * 0.5) * (0.7 + clump * 0.6);
             float aer = smoothstep(0.0, 0.4, t);
             // 작은 폭포(uRag)는 얕고 거칠게 부서지는 물이라 처음부터 하얗게 거품이 인다 (파란 판처럼 안 보이게)
             float white = smoothstep(0.5 - aer * 0.3, 0.8 - aer * 0.25, streak) + aer * 0.3 + uRag * (0.28 + 0.4 * smoothstep(0.0, 0.45, t)) * (0.6 + A.r * 0.6);
@@ -848,7 +912,7 @@
             float thr = mix(-0.15, 0.5, smoothstep(0.1, 1.0, t));
             // 작은 폭포: 가장자리일수록 더 쉽게 찢어져 가닥만 남는다 (자로 자른 커튼처럼 안 보이게)
             thr += uRag * (1.0 - smoothstep(0.0, 0.6, e)) * (0.32 + 0.25 * smoothstep(0.0, 0.5, t));
-            float dens = A.b * 0.55 + B.b * 0.25 + streak * 0.3;
+            float dens = A.r * 0.35 + B.r * 0.3 + A.g * 0.2 + streak * 0.2 + (clump - 0.5) * 0.3; // 고운 b채널은 빨리 흐르면 착시가 나서 안 쓴다
             alpha = smoothstep(thr, thr + 0.16, dens);
             alpha *= smoothstep(0.0, 0.18 + B.b * 0.25, e);
             alpha *= mix(0.86, 1.0, clamp(white, 0.0, 1.0)) * (1.0 - smoothstep(0.86, 1.0, t) * 0.75);
@@ -857,6 +921,166 @@
           #include <encodings_fragment>
         }`,
     });
+  }
+
+  // ---------- 물기둥(혀+기둥) 생성기: 큰 폭포와 계곡의 작은 폭포가 같은 모양·재질을 쓴다 ----------
+  // o.at(lat, s): 가로 lat(m)·흐름 방향 s(m, 음수=상류) → [x, z]. topY: 턱 수면, H: 낙차, W: 폭, T0: 가운데 두께, v0c: 가운데 앞속도,
+  // sup: 턱 위로 이어 그리는 길이, narrow: 상류 폭 비율, aer0: 처음부터 섞인 공기(급류에서 오는 물은 이미 하얗다), sd: 무늬 시드
+  // 턱에서 유리 같은 혀로 부풀어 넘어가 → 떨어지며 공기가 섞여 불투명한 흰 기둥이 되고 → 가장자리만 가닥으로 찢어진다.
+  // (반투명 판 여러 장을 알파로 깎아 가닥을 내면 전체가 거즈처럼 비쳐 바람처럼 보였다. 질량은 '꽉 찬 가운데'에서 나온다)
+  function fallCore(o) {
+    const { at, topY, H, W, T0, v0c, sup } = o, narrow = o.narrow === undefined ? 1 : o.narrow, sd = o.sd || 0, aer0 = o.aer0 || 0, supA = o.supA === undefined ? 0.92 : o.supA;
+    const G = 9.8, HW = W / 2, TMAX = Math.sqrt((2 * H) / G);
+    // 가로 위치 q(-1~1)에 따른 물 두께·앞으로 쏘는 속도: 가운데가 두껍고 빠르다 (볼록한 혀), 두께는 가로로 조금씩 다르다
+    const prof = (q) => Math.sqrt(Math.max(0, 1 - q * q));
+    const thickAt = (q) => T0 * (0.3 + 0.7 * prof(q)) * (1 + (vnoise(q * 3.1 + 7, 2.2 + sd, seed + 311) - 0.5) * 0.3);
+    const v0At = (q) => v0c * 0.62 + v0c * 0.38 * prof(q);
+    const NC = o.nc || 40, NA = o.na || 10, NF = o.nf || 64, ROWS = NA + NF + 1, pos = [], uv = [], aT = [], aE = [], idx = [];
+    const nk = Math.min(1.4, sup * 0.4), bk = Math.min(1.6, sup * 0.45);
+    for (let i = 0; i <= NC; i++) {
+      const u = i / NC, q = (u * 2 - 1) * 1.12; // 가장자리 여유(찢어질 몫)
+      const qq = Math.min(1, Math.abs(q)), lat0 = q * HW, th0 = thickAt(qq), v0 = v0At(qq);
+      for (let j = 0; j < ROWS; j++) {
+        let x, y, z, t;
+        if (j < NA) {
+          // 턱 위: 수면에서 흘러와 마루에서 두께만큼 부풀어 오른다. 상류는 좁게(물길 폭), 마루에서 넓어진다
+          const s = -sup * (1 - j / NA), k = ss(-bk, 0, s);
+          const [px, pz] = at(lat0 * (narrow + (1 - narrow) * ss(-nk, 0, s)), s);
+          x = px; z = pz; y = topY + th0 * 0.7 * k; t = s / sup; // 음수
+        } else {
+          const tau = (TMAX * 1.03 * (j - NA)) / NF, drop = 0.5 * G * tau * tau, out = v0 * tau;
+          const sp = Math.hypot(v0, G * tau), th = th0 * (v0 / sp) + 0.05 * Math.min(1, T0 / 0.5); // 빨라질수록 얇아진다 (유량 보존)
+          // 궤적의 바깥 법선(앞·위)으로 두께만큼 밀어 물의 '겉면'을 만든다 → 턱이 둥글게 부푼다
+          const nx0 = (G * tau) / sp, ny0 = v0 / sp, tn = tau / (TMAX * 1.03);
+          // 옆선이 자로 그은 듯 곧지 않게: 떨어질수록 가로로 조금씩 흔들린다
+          const lat = lat0 * (1 + (0.1 * drop) / H) + (vnoise(tn * 5.5 + 3, q * 1.5 + 4 + sd, seed + 313) - 0.5) * 0.5 * (W / 4.4) * ss(0.05, 0.7, tn);
+          const [px, pz] = at(lat, out + nx0 * th);
+          x = px; z = pz; y = topY - drop + ny0 * th; t = tn;
+        }
+        pos.push(x, y, z); uv.push(u, t); aT.push(t); aE.push(Math.abs(q));
+        if (i < NC && j < ROWS - 1) { const k = i * ROWS + j; idx.push(k, k + 1, k + ROWS, k + 1, k + ROWS + 1, k + ROWS); }
+      }
+    }
+    const g = new T.BufferGeometry();
+    g.setAttribute('position', new T.Float32BufferAttribute(pos, 3));
+    g.setAttribute('uv', new T.Float32BufferAttribute(uv, 2));
+    g.setAttribute('aT', new T.Float32BufferAttribute(aT, 1));
+    g.setAttribute('aE', new T.Float32BufferAttribute(aE, 1));
+    g.setIndex(idx);
+    g.computeVertexNormals();
+    const mat = new T.ShaderMaterial({
+      transparent: true, depthWrite: true, side: T.DoubleSide,
+      uniforms: { uTime: waterMat.uniforms.uTime, uTex: { value: fallTextures().streak }, uSeed: { value: (seed + sd) % 7 }, uWx: { value: W / 4.4 }, uAer0: { value: aer0 }, uSupA: { value: supA }, uLight: fallLight, uSky: waterMat.uniforms.uMid, uSun: fallSun, ...DU },
+      vertexShader: `attribute float aT, aE; varying vec2 vUv; varying float vT, vE; varying vec3 vW, vN;
+        void main(){ vUv = uv; vT = aT; vE = aE; vec4 w = modelMatrix * vec4(position,1.0); vW = w.xyz; vN = normalize(mat3(modelMatrix) * normal); gl_Position = projectionMatrix * viewMatrix * w; }`,
+      fragmentShader: `uniform float uTime, uSeed, uWx, uAer0, uSupA; uniform sampler2D uTex; uniform vec3 uLight, uSky, uSun; varying vec2 vUv; varying float vT, vE; varying vec3 vW, vN;
+        ${DEPTH_GLSL}
+        void main(){
+          float t = vT, x = vUv.x * uWx;
+          vec3 V = normalize(cameraPosition - vW);
+          vec3 n = normalize(vN); if (dot(n, V) < 0.0) n = -n;
+          float fr = pow(1.0 - max(0.0, dot(n, V)), 3.0);
+          float lit = 0.6 + 0.4 * max(0.0, dot(n, uSun));
+          // 흐름 무늬는 '시간' 좌표: 빨라질수록 저절로 늘어난다. 한 지점을 초당 4주기 이하로 지나게(저fps에서 거꾸로 흐르는 착시 방지)
+          vec4 A = texture2D(uTex, vec2(x * 0.9 + uSeed, t * 3.0 - uTime * 1.9));
+          vec4 B = texture2D(uTex, vec2(x * 0.45 + uSeed * 1.7 + 0.3, t * 1.5 - uTime * 0.95));
+          vec4 P = texture2D(uTex, vec2(x * 0.3 + 0.1, t * 0.6 - uTime * 0.38));
+          // 가는 세로 밧줄 무늬(폭포 특유의 줄기)를 굵은 덩어리에 곱한다 (굵은 것만 쓰면 구름처럼 뭉개진다)
+          float ropes = texture2D(uTex, vec2(x * 3.2 + uSeed * 0.5, t * 3.0 - uTime * 1.9)).r;
+          float streak = (A.r * 0.55 + B.r * 0.45) * (0.65 + ropes * 0.7), pulse = P.b;
+          // 공기 섞임: 마루에선 매끈한 유리물, 떨어지며 하얘진다 (급류에서 온 물은 처음부터 어느 정도 하얗다)
+          float aer = max(uAer0, smoothstep(0.0, 0.4, t));
+          vec3 glass = mix(vec3(0.03, 0.15, 0.16), uSky * 0.55, 0.14 + fr * 0.4);
+          glass += uSky * pow(max(0.0, dot(reflect(-V, n), uSun)), 28.0) * 0.6;
+          vec3 foam = vec3(0.93, 0.97, 1.0) * lit * (1.0 - 0.5 * vE * vE); // 기둥 옆면은 어둡게 (둥근 몸통)
+          // 흰 줄(공기 많은 물)과 그 사이 탁한 청록 몸체: 대비가 있어야 두께가 보인다
+          float white = aer * smoothstep(0.33, 0.8, streak * 0.75 + pulse * 0.35 + 0.05);
+          vec3 body = mix(glass, foam, 0.3);
+          vec3 col = mix(glass, body, aer);
+          col = mix(col, foam, white);
+          // 알파: 가운데는 꽉 찬 물, 가장자리로 갈수록·떨어질수록 가는 가닥으로 찢어진다
+          float dens = ropes * 0.5 + A.g * 0.35 + streak * 0.15;
+          float e = smoothstep(0.6, 1.08, vE) * (0.45 + 0.55 * smoothstep(0.0, 0.7, max(t, 0.0)));
+          float thr = mix(-0.35, 0.66, e);
+          float alpha = smoothstep(thr, thr + 0.18, dens);
+          alpha *= 1.0 - smoothstep(0.88, 1.0, t) * 0.55; // 밑동은 물보라 속으로
+          if (t < 0.0) {
+            if (cameraPosition.y < vW.y - 0.03) discard; // 턱 위 물판은 밑면이 없다 (아래서 올려다보면 쟁반처럼 보였다)
+            // 턱 위: 맑은 물에 상류의 흰 줄이 조금 섞여 흘러온다. 위쪽 끝과 옆은 서서히
+            float sw = 0.12 + uAer0 * 0.3 + smoothstep(0.55, 0.9, A.g) * 0.35 * (0.5 + 0.5 * smoothstep(-1.0, 0.0, t));
+            col = mix(glass, foam, sw);
+            alpha = uSupA * smoothstep(-1.0, -0.72, t) * smoothstep(1.1, 0.92, vE);
+          }
+          alpha *= smoothstep(0.0, 0.3, waterThick()); // 소·바위와 닿는 곳은 부드럽게
+          if (alpha < 0.02) discard;
+          gl_FragColor = vec4(col * uLight, alpha);
+          #include <encodings_fragment>
+        }`,
+    });
+    const mesh = new T.Mesh(g, mat);
+    mesh.renderOrder = 6;
+    mesh.frustumCulled = false;
+    return { mesh, mat, TMAX, OUT_END: v0c * TMAX, thickAt, v0At, HW, W };
+  }
+
+  // ---------- 떨어지는 물덩이: 속도 방향으로 길게 늘어난 물방울 수천 개가 중력으로 가속하며 떨어진다 (무게·속도감은 여기서) ----------
+  // NP개는 턱에서 떨어지는 덩이, NS개는 바닥에 부딪혀 튀는 짧은 물방울. spawn/spawnSplash가 pp·pv·pa·psz·floor를 채운다
+  function chunkSystem(NP, NS) {
+    const N = NP + NS, pp = new Float32Array(N * 3), pv = new Float32Array(N * 3), pa = new Float32Array(N), psz = new Float32Array(N), life = new Float32Array(N), age = new Float32Array(N), floor = new Float32Array(N);
+    const base = new T.PlaneGeometry(1, 1), pg = new T.InstancedBufferGeometry();
+    pg.index = base.index;
+    pg.setAttribute('position', base.attributes.position);
+    pg.setAttribute('uv', base.attributes.uv);
+    pg.setAttribute('iPos', new T.InstancedBufferAttribute(pp, 3).setUsage(T.DynamicDrawUsage));
+    pg.setAttribute('iVel', new T.InstancedBufferAttribute(pv, 3).setUsage(T.DynamicDrawUsage));
+    pg.setAttribute('iA', new T.InstancedBufferAttribute(pa, 1).setUsage(T.DynamicDrawUsage));
+    pg.setAttribute('iSz', new T.InstancedBufferAttribute(psz, 1).setUsage(T.DynamicDrawUsage));
+    pg.instanceCount = N;
+    const pmat = new T.ShaderMaterial({
+      transparent: true, depthWrite: false,
+      uniforms: { uLight: fallLight, ...DU },
+      vertexShader: `attribute vec3 iPos, iVel; attribute float iA, iSz; varying vec2 vUv; varying float vA;
+        void main(){
+          vec4 mv = modelViewMatrix * vec4(iPos, 1.0);
+          // 화면에서 속도 방향으로 눕히고, 빠를수록 길게 (움직임이 흐려 보이는 효과)
+          vec3 vv = (viewMatrix * vec4(iVel, 0.0)).xyz;
+          float sp = length(iVel), l2 = length(vv.xy);
+          vec2 dir = l2 > 1e-4 ? vv.xy / l2 : vec2(0.0, 1.0), perp = vec2(-dir.y, dir.x);
+          float k = clamp(sp * 0.07, 0.0, 1.0);
+          float len = mix(0.09, 0.62, k) * iSz, wid = 0.04 * iSz * (1.3 - 0.5 * k);
+          mv.xyz += vec3(dir * position.y * len + perp * position.x * wid, 0.0);
+          vUv = uv; vA = iA * smoothstep(0.4, 1.6, -mv.z);
+          gl_Position = projectionMatrix * mv; }`,
+      fragmentShader: `uniform vec3 uLight; varying vec2 vUv; varying float vA;
+        ${DEPTH_GLSL}
+        void main(){
+          float a = smoothstep(0.5, 0.18, abs(vUv.x - 0.5)) * smoothstep(0.5, 0.28, abs(vUv.y - 0.5));
+          gl_FragColor = vec4(vec3(0.96, 0.98, 1.0) * uLight, a * vA * smoothstep(0.0, 0.25, waterThick()));
+          #include <encodings_fragment>
+        }`,
+    });
+    const mesh = new T.Mesh(pg, pmat);
+    mesh.frustumCulled = false;
+    mesh.renderOrder = 8;
+    const sys = { mesh, pg, pp, pv, pa, psz, life, age, floor, NP, NS };
+    // 중력으로 가속, 바닥(floor)에 닿으면 다시 턱에서. 튀는 물방울은 짧게 살고 나이 들수록 옅어진다 (정점에서 밝으면 물이 솟는 듯 보인다)
+    sys.step = (dt, spawn, spawnSplash) => {
+      for (let k = 0; k < N; k++) {
+        pv[k * 3 + 1] -= 9.8 * dt;
+        pp[k * 3] += pv[k * 3] * dt; pp[k * 3 + 1] += pv[k * 3 + 1] * dt; pp[k * 3 + 2] += pv[k * 3 + 2] * dt;
+        if (k < NP) { if (pp[k * 3 + 1] < floor[k] + 0.02) spawn(k); }
+        else {
+          age[k] += dt;
+          if (age[k] > life[k] || pp[k * 3 + 1] < floor[k]) spawnSplash(k);
+          else pa[k] = 0.75 * (1 - age[k] / life[k]);
+        }
+      }
+      pg.attributes.iPos.needsUpdate = true;
+      pg.attributes.iVel.needsUpdate = true;
+      pg.attributes.iA.needsUpdate = true;
+      pg.attributes.iSz.needsUpdate = true;
+    };
+    return sys;
   }
 
   // 화면을 향하는 거품·물안개 덩어리 (인스턴스 사각형, 나이에 따라 침식되며 사라짐)
@@ -876,7 +1100,7 @@
     g.instanceCount = n;
     const m = new T.ShaderMaterial({
       transparent: true, depthWrite: false,
-      uniforms: { uFoam: { value: tex }, uLight: fallLight, uOp: { value: op }, uNear: { value: 1 }, uStretch: { value: new T.Vector2(1, 1) }, uFadeNear: { value: new T.Vector2(0.9, 2.6) }, ...DU },
+      uniforms: { uFoam: { value: tex }, uLight: fallLight, uOp: { value: op }, uNear: { value: 1 }, uGrad: { value: 0 }, uStretch: { value: new T.Vector2(1, 1) }, uFadeNear: { value: new T.Vector2(0.9, 2.6) }, ...DU },
       vertexShader: `attribute vec3 iPos; attribute float iSize, iAge, iRot, iVar; uniform vec2 uStretch; varying vec2 vUv; varying float vAge, vVar;
         void main(){
           vec3 right = vec3(viewMatrix[0][0], viewMatrix[1][0], viewMatrix[2][0]);
@@ -886,7 +1110,7 @@
           vUv = uv; vAge = iAge; vVar = iVar;
           gl_Position = projectionMatrix * viewMatrix * vec4(iPos + right * p.x + up * p.y, 1.0);
         }`,
-      fragmentShader: `uniform sampler2D uFoam; uniform vec3 uLight; uniform float uOp, uNear; uniform vec2 uFadeNear; varying vec2 vUv; varying float vAge, vVar;
+      fragmentShader: `uniform sampler2D uFoam; uniform vec3 uLight; uniform float uOp, uNear, uGrad; uniform vec2 uFadeNear; varying vec2 vUv; varying float vAge, vVar;
         ${DEPTH_GLSL}
         void main(){
           vec2 cell = vec2(mod(vVar, 2.0), floor(vVar / 2.0)) * 0.5;
@@ -894,7 +1118,7 @@
           float thr = 0.12 + smoothstep(0.2, 1.0, vAge) * 0.75;
           float a = smoothstep(thr, thr + 0.25, f.a) * smoothstep(0.0, 0.1, vAge);
           float vd = uDepthOn > 0.5 ? linZ(gl_FragCoord.z) : 10.0;
-          gl_FragColor = vec4(f.rgb * uLight, a * uOp * uNear * smoothstep(0.0, 0.5, waterThick()) * smoothstep(uFadeNear.x, uFadeNear.y, vd));
+          gl_FragColor = vec4(f.rgb * uLight * mix(1.0, 0.55 + 0.65 * vUv.y, uGrad), a * uOp * uNear * smoothstep(0.0, 0.5, waterThick()) * smoothstep(uFadeNear.x, uFadeNear.y, vd)); // uGrad: 위가 밝고 아래가 어두운 덩어리
           #include <encodings_fragment>
         }`,
     });
@@ -944,7 +1168,7 @@
           const v = j / NR, y = poolY - 1.0 + (capH - poolY + 1.0) * v;
           const n = vnoise(phi * 7 + 3, y * 0.7, seed + 71), n2 = vnoise(phi * 24, y * 2.4, seed + 73);
           const strata = Math.sin(y * 2.6 + n * 5) * 0.16 + (vnoise(phi * 3, y * 0.35, seed + 75) - 0.5) * 0.5;
-          const disp = Math.max(-0.04, (n - 0.3) * 1.1 + n2 * 0.3 + strata) * (1 - lk * 0.55);
+          const disp = Math.max(-0.06, ((n - 0.3) * 1.1 + n2 * 0.3 + strata) * 1.5) * (1 - lk * 0.55); // 굴곡을 키워 벽 자체가 덩어리져 보이게
           const [x, z] = arc(phi, RW + disp);
           pos.push(x, y, z); uvs.push(phi * RW * 0.32, y * 0.32);
           wet.push(Math.min(1, ss(0.6, 0.15, Math.abs(phi)) * (0.55 + 0.45 * (1 - v)) + ss(0.25, 0, v) * 0.6));
@@ -997,103 +1221,45 @@
       grp.add(wall);
     }
 
-    // --- 물줄기: 폭·낙하 곡선이 조금씩 다른 여러 갈래를 겹쳐 두께와 결을 만든다 ---
-    const G = 9.8, TMAX = Math.sqrt((2 * H) / G), W = 4.4, rr = I.rng.make(seed + 909), ribbons = [];
-    for (let i = 0; i < 8; i++)
-      ribbons.push({ lat: -W / 2 + (W * (i + 0.5)) / 8 + (rr() - 0.5) * 0.3, w: 0.85 + rr() * 0.9, v0: 1.7 + rr() * 0.8, out0: 0.02 + rr() * 0.18, seed: rr() * 10, op: 0.82 + rr() * 0.18, speed: 0.9 + rr() * 0.25 });
-    for (const sdn of [-1, 1])
-      for (let i = 0; i < 2; i++)
-        ribbons.push({ lat: sdn * (W / 2 + 0.3 + i * 0.55 + rr() * 0.2), w: 0.25 + rr() * 0.25, v0: 0.35 + rr() * 0.5, out0: 0, seed: rr() * 10, op: 0.8, speed: 0.75 + rr() * 0.3 });
-    ribbons.forEach((r, ri) => {
-      const NC = Math.max(3, Math.round(r.w * 5)), NF = 50, pos = [], uv = [], idx = [];
-      for (let j = 0; j <= NF; j++)
-        for (let i = 0; i <= NC; i++) {
-          const u = i / NC, tau = (TMAX * j) / NF, drop = 0.5 * G * tau * tau;
-          const lat = r.lat + (u - 0.5) * r.w * (1 + (0.18 * drop) / H);
-          const [x, z] = arc(lat / RW, RW - 0.15 - r.out0 - r.v0 * tau);
-          pos.push(x, fl.top + 0.1 - drop, z); uv.push(u, drop / H);
-          if (i < NC && j < NF) { const k = j * (NC + 1) + i; idx.push(k, k + NC + 1, k + 1, k + 1, k + NC + 1, k + NC + 2); }
-        }
-      const g = new T.BufferGeometry();
-      g.setAttribute('position', new T.Float32BufferAttribute(pos, 3));
-      g.setAttribute('uv', new T.Float32BufferAttribute(uv, 2));
-      g.setIndex(idx);
-      const m = new T.Mesh(g, fallSheetMat(r, H));
-      m.renderOrder = 6 + (ri % 3);
-      m.frustumCulled = false;
-      grp.add(m);
-      r.imp = arc(r.lat / RW, RW - 0.15 - r.out0 - r.v0 * TMAX);
-    });
-    // 바위턱 위를 흘러와 가장자리에서 부푸는 물: 위 작은 폭포가 떨어진 자리는 하얗게 끓고, 입구로 갈수록 빨라지며 물마루가 선다.
-    // (예전엔 폭포 줄기 재질을 평평하게 깔아, 위에서 보면 바위 밖으로 삐져나온 각진 물판이었다 → 수심으로 물가를 녹인다)
-    {
-      const L = 3.9, NA = 14, w = W + 0.6, NC = 24, pos = [], uv = [], aa = [], idx = [];
-      for (let j = 0; j <= NA; j++)
-        for (let i = 0; i <= NC; i++) {
-          const u = i / NC, s0 = -L + (L * j) / NA, spread = ss(-L, -0.6, s0);
-          const lat = (u - 0.5) * (2.6 + (w - 2.6) * spread);
-          const [x, z] = arc(lat / RW, RW - 0.15 - s0);
-          pos.push(x, fl.top + 0.1, z);
-          uv.push(u, s0);
-          aa.push(j / NA);
-          if (i < NC && j < NA) { const k = j * (NC + 1) + i; idx.push(k, k + NC + 1, k + 1, k + 1, k + NC + 1, k + NC + 2); }
-        }
-      const g = new T.BufferGeometry();
-      g.setAttribute('position', new T.Float32BufferAttribute(pos, 3));
-      g.setAttribute('uv', new T.Float32BufferAttribute(uv, 2));
-      g.setAttribute('aA', new T.Float32BufferAttribute(aa, 1));
-      g.setIndex(idx);
-      const sm = new T.ShaderMaterial({
-        transparent: true, depthWrite: false, side: T.DoubleSide,
-        uniforms: { uTime: waterMat.uniforms.uTime, uNormals: waterMat.uniforms.uNormals, uStreak: { value: fallTextures().streak }, uSky: waterMat.uniforms.uMid, uLight: fallLight, ...DU },
-        vertexShader: 'attribute float aA; varying vec2 vUv; varying float vA; varying vec3 vW; void main(){ vUv = uv; vA = aA; vec4 w = modelMatrix * vec4(position,1.0); vW = w.xyz; gl_Position = projectionMatrix * viewMatrix * w; }',
-        fragmentShader: `uniform float uTime; uniform sampler2D uNormals, uStreak; uniform vec3 uSky, uLight; varying vec2 vUv; varying float vA; varying vec3 vW;
-          ${DEPTH_GLSL}
-          void main(){
-            float speed = mix(0.45, 2.0, vA * vA);
-            vec3 n1 = texture2D(uNormals, vec2(vUv.x * 1.4, vUv.y * 0.3 - uTime * speed * 0.45)).rgb * 2.0 - 1.0;
-            vec3 n2 = texture2D(uNormals, vec2(vUv.x * 2.6 + 0.37, vUv.y * 0.55 - uTime * speed * 0.8)).rgb * 2.0 - 1.0;
-            n1 = normalize(n1 + n2);
-            // 줄무늬는 흐름 방향으로 길게 늘여 쓴다 (짧게 쓰면 같은 화살촉 무늬가 줄지어 찍혀 보였다)
-            vec4 st = texture2D(uStreak, vec2(vUv.x * 1.6, vUv.y * 0.09 - uTime * speed * 0.16));
-            vec4 st2 = texture2D(uStreak, vec2(vUv.x * 2.7 + 0.3, vUv.y * 0.14 - uTime * speed * 0.24));
-            float th = waterThick();
-            vec3 V = normalize(cameraPosition - vW);
-            float fr = pow(1.0 - abs(V.y), 3.0);
-            vec3 col = mix(vec3(0.27, 0.45, 0.37), vec3(0.07, 0.22, 0.21), smoothstep(0.03, 0.35, th));
-            col = mix(col, uSky * 0.8, 0.1 + fr * 0.45 + n1.x * 0.05);
-            float land = smoothstep(0.3, 0.0, vA) * (0.4 + st.r * 0.6);
-            float streaks = smoothstep(0.55, 0.9, st2.g) * (0.25 + 0.5 * vA) * 0.8;
-            float crest = smoothstep(0.88, 1.0, vA) * (0.35 + st.r * 0.5);
-            float shore = smoothstep(0.1, 0.0, th) * (0.35 + st.r * 0.4);
-            float foam = clamp(land + streaks + crest + shore * 0.6, 0.0, 1.0);
-            col = mix(col, vec3(0.96, 0.98, 1.0), foam);
-            col += uSky * pow(max(0.0, n1.x * 0.7 + n1.y * 0.4), 5.0) * 0.4;
-            float alpha = max(mix(0.6, 0.93, smoothstep(0.0, 0.2, th)), foam * 0.95) * smoothstep(0.0, 0.05, th);
-            // 옆·위쪽 끝은 서서히 (바위턱 밖 허공 위로 물판 끝이 칼로 자른 듯 보이지 않게)
-            alpha *= smoothstep(0.0, 0.2, vUv.x) * smoothstep(1.0, 0.8, vUv.x) * smoothstep(0.0, 0.16, vA);
-            gl_FragColor = vec4(col * uLight, alpha);
-            #include <encodings_fragment>
-          }`,
-      });
-      const m = new T.Mesh(g, sm);
-      m.renderOrder = 5;
-      grp.add(m);
-    }
-    const OUT_END = 2.1 * TMAX;
-    const pick = () => { let tw = 0; for (const r of ribbons) tw += r.w; let k = Math.random() * tw; for (const r of ribbons) { k -= r.w; if (k <= 0) return r; } return ribbons[0]; };
-
-    // --- 소: 깊은 물빛, 떨어지는 자리의 하얀 소용돌이, 밖으로 흘러가는 거품 조각 ---
+    // ===== 물줄기 v2: 두께가 있는 하나의 물기둥 =====
+    // 턱에서 유리 같은 혀로 부풀어 넘어가 → 떨어지며 공기가 섞여 불투명한 흰 기둥이 되고 → 가장자리만 가닥으로 찢어진다.
+    // (예전엔 반투명 판 12장을 알파로 깎아 가닥을 냈는데, 전체가 거즈처럼 비쳐 바람처럼 보였다. 질량은 '꽉 찬 가운데'에서 나온다)
+    const G = 9.8, W = 4.4, HW = W / 2, T0 = 0.55, V0C = 2.1;
+    const TMAX = Math.sqrt((2 * H) / G), OUT_END = V0C * TMAX;
+    const coarse = !!(window.matchMedia && matchMedia('(pointer: coarse)').matches);
+    // 가로 위치 q(-1~1)에 따른 물 두께·앞으로 쏘는 속도: 가운데가 두껍고 빠르다 (볼록한 혀), 두께는 가로로 조금씩 다르다
+    const prof = (q) => Math.sqrt(Math.max(0, 1 - q * q));
+    const thickAt = (q) => T0 * (0.3 + 0.7 * prof(q)) * (1 + (vnoise(q * 3.1 + 7, 2.2, seed + 311) - 0.5) * 0.3);
+    const v0At = (q) => 1.3 + (V0C - 1.3) * prof(q);
+    const toCenter = (x, z) => { const dx = fl.cx - x, dz = fl.cz - z, d = Math.hypot(dx, dz) || 1; return [dx / d, dz / d]; };
+    const SUP = 3.6; // 턱 위로 이어 그리는 길이
+    const core = fallCore({ at: (lat, s) => arc(lat / RW, RW - 0.15 - s), topY: fl.top + 0.1, H, W, T0, v0c: V0C, sup: SUP, narrow: 0.55, aer0: 0, sd: 0 });
+    grp.add(core.mesh);
+    const coreMat = core.mat;
+    // 폭포 끝(물기둥 겉면 기준)에서 소까지 — 물보라·소 중심
     const [ix, iz] = arc(0, RW - 0.15 - OUT_END);
     const imp = new T.Vector3(ix, poolY, iz);
-    const pool = new T.Mesh(new T.CircleGeometry(R0 + 1.3, 96).rotateX(-Math.PI / 2), new T.ShaderMaterial({
+    // 가로 위치 표본: 가운데가 두꺼우니 가운데에 몰리게
+    const pickQ = () => Math.max(-1.05, Math.min(1.05, (Math.random() + Math.random() - 1) * 1.15));
+
+    // --- 소: 깊은 물빛, 떨어지는 자리의 하얀 소용돌이, 밖으로 흘러가는 거품 조각. 수면은 낙수 지점에서 실제로 울렁인다 ---
+    const pool = new T.Mesh(new T.PlaneGeometry((R0 + 1.3) * 2, (R0 + 1.3) * 2, 44, 44).rotateX(-Math.PI / 2), new T.ShaderMaterial({
       transparent: true, depthWrite: false, side: T.DoubleSide,
       uniforms: {
         uTime: waterMat.uniforms.uTime, uLight: fallLight, uSky: waterMat.uniforms.uMid, uTex: { value: fallTextures().streak },
         uImp: { value: new T.Vector2(ix, iz) }, uF: { value: new T.Vector2(fx, fz) }, uHalfW: { value: W / 2 + 0.6 }, uC: { value: new T.Vector2(fl.cx, fl.cz) }, uR: { value: R0 + 1.3 },
         ...DU,
       },
-      vertexShader: 'varying vec3 vW; void main(){ vec4 w = modelMatrix * vec4(position,1.0); vW = w.xyz; gl_Position = projectionMatrix * viewMatrix * w; }',
+      vertexShader: `uniform float uTime, uHalfW; uniform vec2 uImp, uF; varying vec3 vW;
+        void main(){
+          vec4 w = modelMatrix * vec4(position,1.0);
+          vec2 p = w.xz - uImp, sd = vec2(-uF.y, uF.x);
+          float a = dot(p, uF), l = dot(p, sd);
+          float dl = length(vec2(max(0.0, abs(l) - uHalfW), a));
+          // 낙수 지점에서 밀려 나가는 너울 (무게가 때리는 느낌)
+          float amp = smoothstep(6.5, 0.8, dl);
+          w.y += (sin(dl * 2.6 - uTime * 3.2) * 0.05 + sin(dl * 5.1 - uTime * 4.7 + l * 1.3) * 0.025) * amp;
+          vW = w.xyz; gl_Position = projectionMatrix * viewMatrix * w; }`,
       fragmentShader: `uniform float uTime, uHalfW, uR; uniform vec2 uImp, uF, uC; uniform vec3 uLight, uSky; uniform sampler2D uTex; varying vec3 vW;
         ${NOISE_GLSL}
         ${DEPTH_GLSL}
@@ -1103,20 +1269,20 @@
           float dl = length(vec2(max(0.0, abs(l) - uHalfW), a));
           float dc = length(vW.xz - uC);
           float n = fbm(vec2(l * 0.9, dl * 1.5 - uTime * 1.5));
-          vec3 deep = mix(vec3(0.02, 0.13, 0.15), vec3(0.1, 0.36, 0.36), smoothstep(uR * 0.3, uR * 1.0, dc));
+          vec3 deep = mix(vec3(0.02, 0.12, 0.14), vec3(0.09, 0.33, 0.34), smoothstep(uR * 0.3, uR * 1.0, dc));
           vec3 V = normalize(cameraPosition - vW);
           float fr = pow(1.0 - max(V.y, 0.0), 4.0);
           vec4 tx = texture2D(uTex, vec2(l * 0.16 + 0.3, dl * 0.12 - uTime * 0.09));
           vec3 col = mix(deep, uSky * 0.6, 0.04 + fr * 0.35 + (tx.g - 0.4) * 0.08);
-          float boil = smoothstep(2.2, 0.0, dl) * (0.45 + n * 0.6);
-          float ring = (sin(dl * 4.5 - uTime * 4.0 + n * 2.0) * 0.5 + 0.5) * smoothstep(5.0, 1.0, dl) * 0.08;
+          float boil = smoothstep(2.6, 0.0, dl) * (0.5 + n * 0.6);
+          float ring = (sin(dl * 2.6 - uTime * 3.2 + n * 1.5) * 0.5 + 0.5) * smoothstep(6.5, 1.0, dl) * 0.14;
           float patches = smoothstep(0.62, 0.9, tx.b) * smoothstep(7.0, 1.5, dl) * 0.4;
           float th = waterThick();
           float edgeFoam = smoothstep(0.55, 0.0, th) * (0.35 + tx.r * 0.65);
           float foam = clamp(boil + ring + patches + edgeFoam * 0.8, 0.0, 1.0);
           col = mix(col, vec3(0.95, 0.97, 0.98), foam);
-          col = mix(vec3(0.16, 0.36, 0.33), col, smoothstep(0.0, 1.2, th) * 0.6 + 0.4);
-          float alpha = smoothstep(uR, uR - 0.8, dc) * mix(0.9, 1.0, foam) * smoothstep(0.0, 0.14, th);
+          col = mix(vec3(0.16, 0.36, 0.33), col, smoothstep(0.0, 1.0, th) * 0.65 + 0.35);
+          float alpha = smoothstep(uR, uR - 0.8, dc) * mix(0.93, 1.0, foam) * smoothstep(0.0, 0.14, th);
           gl_FragColor = vec4(col * uLight, alpha);
           #include <encodings_fragment>
         }`,
@@ -1125,75 +1291,71 @@
     pool.renderOrder = 4;
     grp.add(pool);
 
-    // --- 바닥 거품: 떨어지는 자리마다 하얀 물거품 덩어리가 끓어오른다 (진짜처럼 보이게 하는 핵심) ---
+    // --- 밑동 플룸: 떨어진 물이 크고 무겁게 솟았다 가라앉는 흰 덩어리 (위가 밝고 아래가 어두운 덩어리라 부피가 보인다) ---
     const ftex = fallTextures().foam;
-    const toCenter = (x, z) => { const dx = fl.cx - x, dz = fl.cz - z, d = Math.hypot(dx, dz) || 1; return [dx / d, dz / d]; };
-    const foam = foamSystem(360, 0.5, ftex);
-    foam.mat.uniforms.uStretch.value.set(1.45, 0.8);
+    const foam = foamSystem(coarse ? 140 : 240, 0.75, ftex);
+    foam.mat.uniforms.uStretch.value.set(1.25, 1.0);
+    foam.mat.uniforms.uGrad.value = 0.45;
     const spawnFoam = (sy, i) => {
-      const r = pick(), j = (Math.random() - 0.5) * r.w * 1.1;
-      const [x, z] = arc((r.lat + j) / RW, RW - 0.15 - r.out0 - r.v0 * TMAX * (0.9 + Math.random() * 0.2));
-      const [cx2, cz2] = toCenter(x, z), lx = (Math.random() - 0.5) * 0.8, fw = 0.2 + Math.random() * 1.5;
-      sy.P[i * 3] = x; sy.P[i * 3 + 1] = poolY + 0.15 + Math.random() * 0.3; sy.P[i * 3 + 2] = z;
-      sy.vel[i * 3] = cx2 * fw + sx * lx; sy.vel[i * 3 + 1] = 0.2 + Math.random() * 0.9; sy.vel[i * 3 + 2] = cz2 * fw + sz * lx;
-      sy.life[i] = 1.0 + Math.random() * 1.3; sy.age[i] = 0;
-      sy.s0[i] = (0.3 + Math.random() * 0.5) * Math.min(1.3, 0.5 + r.w * 0.6);
-      sy.R[i] = Math.random() * 6.28; sy.rs[i] = (Math.random() - 0.5) * 0.8;
+      const q = pickQ(), v0 = v0At(Math.min(1, Math.abs(q)));
+      const [x, z] = arc((q * HW * 1.1) / RW, RW - 0.15 - v0 * TMAX * (0.85 + Math.random() * 0.3));
+      const [cx2, cz2] = toCenter(x, z), lx = (Math.random() - 0.5) * 1.4, fw = 0.3 + Math.random() * 1.3;
+      sy.P[i * 3] = x; sy.P[i * 3 + 1] = poolY + 0.05 + Math.random() * 0.5; sy.P[i * 3 + 2] = z;
+      sy.vel[i * 3] = cx2 * fw + sx * lx; sy.vel[i * 3 + 1] = 0.35 + Math.random() * 0.75; sy.vel[i * 3 + 2] = cz2 * fw + sz * lx;
+      sy.life[i] = 0.9 + Math.random() * 0.8; sy.age[i] = 0;
+      sy.s0[i] = 0.4 + Math.random() * 0.55;
+      sy.R[i] = (Math.random() - 0.5) * 0.5; sy.rs[i] = (Math.random() - 0.5) * 0.4;
     };
     for (let i = 0; i < foam.n; i++) { spawnFoam(foam, i); foam.age[i] = Math.random() * foam.life[i]; }
     foam.mesh.renderOrder = 9;
     grp.add(foam.mesh);
-    // 물안개: 크고 옅게, 위와 앞으로 번진다
-    const mist = foamSystem(30, 0.15, ftex);
+    // 물안개: 크고 옅게, 낮게 깔려 옆으로 번진다 (위로 솟으면 폭포가 거꾸로 흐르는 듯 보였다)
+    const mist = foamSystem(36, 0.13, ftex);
     mist.mat.uniforms.uFadeNear.value.set(3.0, 7.0); // 폭포 밑에서 헤엄칠 때 화면을 덮지 않게
     const spawnMist = (sy, i) => {
-      const r = pick();
-      const [x, z] = arc(r.lat / RW, RW - 0.15 - r.v0 * TMAX);
-      const [cx2, cz2] = toCenter(x, z), fw = 0.4 + Math.random() * 1.2;
-      sy.P[i * 3] = x; sy.P[i * 3 + 1] = poolY + 0.6; sy.P[i * 3 + 2] = z;
-      sy.vel[i * 3] = cx2 * fw; sy.vel[i * 3 + 1] = 0.6 + Math.random() * 1.3; sy.vel[i * 3 + 2] = cz2 * fw;
-      sy.life[i] = 3.5 + Math.random() * 3; sy.age[i] = 0;
-      sy.s0[i] = 2.5 + Math.random() * 2.5; sy.R[i] = Math.random() * 6.28; sy.rs[i] = (Math.random() - 0.5) * 0.25;
+      const q = pickQ() * 0.9, v0 = v0At(Math.min(1, Math.abs(q)));
+      const [x, z] = arc((q * HW) / RW, RW - 0.15 - v0 * TMAX);
+      const [cx2, cz2] = toCenter(x, z), fw = 0.3 + Math.random() * 0.8;
+      sy.P[i * 3] = x; sy.P[i * 3 + 1] = poolY + 0.4 + Math.random() * 0.8; sy.P[i * 3 + 2] = z;
+      sy.vel[i * 3] = cx2 * fw + sx * (Math.random() - 0.5) * 0.6; sy.vel[i * 3 + 1] = 0.04 + Math.random() * 0.1; sy.vel[i * 3 + 2] = cz2 * fw + sz * (Math.random() - 0.5) * 0.6;
+      sy.life[i] = 3 + Math.random() * 2; sy.age[i] = 0;
+      sy.s0[i] = 1.8 + Math.random() * 1.4; sy.R[i] = Math.random() * 6.28; sy.rs[i] = (Math.random() - 0.5) * 0.2;
     };
     for (let i = 0; i < mist.n; i++) { spawnMist(mist, i); mist.age[i] = Math.random() * mist.life[i]; }
     mist.mesh.renderOrder = 10;
     grp.add(mist.mesh);
 
-    // --- 물방울: 바닥에서 튀고, 물줄기 표면에서 떨어져 나간다 ---
-    const NP = 420, pp = new Float32Array(NP * 3), pa = new Float32Array(NP), psz = new Float32Array(NP);
-    const pv = new Float32Array(NP * 3), life = new Float32Array(NP), age = new Float32Array(NP);
-    const pg = new T.BufferGeometry();
-    pg.setAttribute('position', new T.BufferAttribute(pp, 3).setUsage(T.DynamicDrawUsage));
-    pg.setAttribute('aAlpha', new T.BufferAttribute(pa, 1).setUsage(T.DynamicDrawUsage));
-    pg.setAttribute('aSize', new T.BufferAttribute(psz, 1));
-    const pmat = new T.ShaderMaterial({
-      transparent: true, depthWrite: false,
-      uniforms: { uLight: fallLight, uVH: { value: 600 } },
-      vertexShader: 'attribute float aAlpha, aSize; uniform float uVH; varying float vA; void main(){ vec4 mv = modelViewMatrix * vec4(position,1.0); vA = aAlpha * smoothstep(0.7, 2.6, -mv.z); gl_PointSize = min(uVH * 0.014, aSize * uVH / max(0.5, -mv.z)); gl_Position = projectionMatrix * mv; }', // 코앞 물방울이 눈송이·공처럼 커지지 않게
-      fragmentShader: 'uniform vec3 uLight; varying float vA; void main(){ float d = length(gl_PointCoord - 0.5); gl_FragColor = vec4(vec3(1.0) * uLight, smoothstep(0.5, 0.05, d) * vA); \n#include <encodings_fragment>\n}',
-    });
-    const spray = new T.Points(pg, pmat);
-    spray.frustumCulled = false;
-    spray.renderOrder = 8;
-    grp.add(spray);
+    // --- 떨어지는 물덩이 + 소에 부딪혀 튀는 물방울 ---
+    const chunks = chunkSystem(coarse ? 900 : 1800, coarse ? 80 : 160);
+    const { pp, pv, pa, psz, life, age, floor } = chunks;
+    grp.add(chunks.mesh);
+    // 물덩이 하나를 턱 근처에서 다시 시작 (가장자리 45%는 옆 가닥, 나머지는 기둥 앞면 위)
     const spawn = (k) => {
-      const r = pick(), j = (Math.random() - 0.5) * r.w;
-      let x, y, z, vin, vup;
-      if (Math.random() < 0.75) {
-        [x, z] = arc((r.lat + j) / RW, RW - 0.15 - r.out0 - r.v0 * TMAX);
-        y = poolY + 0.1; vin = 0.4 + Math.random() * 2.4; vup = 1.2 + Math.random() * Math.random() * 4.5;
-      } else {
-        const tau = TMAX * (0.3 + Math.random() * 0.65);
-        [x, z] = arc((r.lat + j) / RW, RW - 0.25 - r.out0 - r.v0 * tau);
-        y = fl.top + 0.1 - 0.5 * G * tau * tau; vin = 0.3 + Math.random() * 0.8; vup = -Math.random() * 2;
-      }
-      const [cx2, cz2] = toCenter(x, z), lx = (Math.random() - 0.5) * 1.4;
-      pp[k * 3] = x; pp[k * 3 + 1] = y; pp[k * 3 + 2] = z;
-      pv[k * 3] = cx2 * vin + sx * lx; pv[k * 3 + 1] = vup; pv[k * 3 + 2] = cz2 * vin + sz * lx;
-      life[k] = 0.5 + Math.random() * 0.9; age[k] = 0;
-      psz[k] = 0.035 + Math.random() * Math.random() * 0.12;
+      const edge = Math.random() < 0.45;
+      const q = edge ? (Math.random() < 0.5 ? -1 : 1) * (0.8 + Math.random() * 0.3) : pickQ() * 0.85;
+      const qq = Math.min(1, Math.abs(q)), v0 = v0At(qq) * (0.9 + Math.random() * 0.25), th0 = thickAt(qq);
+      const tau0 = Math.random() * 0.3 * TMAX, drop = 0.5 * G * tau0 * tau0, out = v0 * tau0;
+      const [x, z] = arc((q * HW) / RW, RW - 0.15 - out - (0.06 + Math.random() * 0.28 + th0 * 0.5));
+      const [cx2, cz2] = toCenter(x, z), lx = (Math.random() - 0.5) * 0.5;
+      pp[k * 3] = x; pp[k * 3 + 1] = fl.top + 0.12 - drop + Math.random() * 0.1; pp[k * 3 + 2] = z;
+      pv[k * 3] = cx2 * v0 + sx * lx; pv[k * 3 + 1] = -G * tau0; pv[k * 3 + 2] = cz2 * v0 + sz * lx;
+      pa[k] = edge ? 0.6 + Math.random() * 0.3 : 0.35 + Math.random() * 0.4;
+      psz[k] = 0.7 + Math.random() * 0.8;
+      life[k] = 99; age[k] = 0; floor[k] = poolY;
     };
-    for (let k = 0; k < NP; k++) { spawn(k); age[k] = Math.random() * life[k]; }
+    const spawnSplash = (k) => {
+      const q = pickQ(), v0 = v0At(Math.min(1, Math.abs(q)));
+      const [x, z] = arc((q * HW * 1.1) / RW, RW - 0.15 - v0 * TMAX * (0.9 + Math.random() * 0.25));
+      const [cx2, cz2] = toCenter(x, z), lx = (Math.random() - 0.5) * 1.2, vin = 0.3 + Math.random() * 1.4;
+      pp[k * 3] = x; pp[k * 3 + 1] = poolY + 0.08; pp[k * 3 + 2] = z;
+      pv[k * 3] = cx2 * vin + sx * lx; pv[k * 3 + 1] = 0.5 + Math.random() * Math.random() * 2.2; pv[k * 3 + 2] = cz2 * vin + sz * lx;
+      pa[k] = 0.5 + Math.random() * 0.3;
+      psz[k] = 0.5 + Math.random() * 0.6;
+      life[k] = 0.35 + Math.random() * 0.4; age[k] = 0; floor[k] = poolY;
+    };
+    for (let k = 0; k < chunks.NP; k++) { spawn(k); const tau = Math.random() * TMAX; pp[k * 3 + 1] -= 0.5 * G * tau * tau; pv[k * 3 + 1] -= G * tau; }
+    for (let k = chunks.NP; k < chunks.NP + chunks.NS; k++) { spawnSplash(k); age[k] = Math.random() * life[k]; }
+
 
     // --- 무지개: 햇빛이 있을 때만 물안개 속에 은은하게 ---
     const rb = new T.Mesh(new T.RingGeometry(3.4, 4.0, 96, 1, 0, Math.PI), new T.ShaderMaterial({
@@ -1215,7 +1377,7 @@
 
     PALETTE.hero.keyPos = [ix + fx * 90 + sx * 45, 75, iz + fz * 90 + sz * 45];
     PALETTE.hero.sunDir = [fx * 0.6 - sx * 0.5, 0.3, fz * 0.6 - sz * 0.5];
-    fallFx = { imp, H, W, poolY, top: fl.top, fx, fz, sx, sz, RW, TMAX, OUT_END, pg, pp, pa, pv, life, age, spawn, NP, pmat, foam, spawnFoam, mist, spawnMist, rb, arc };
+    fallFx = { imp, H, W, poolY, top: fl.top, fx, fz, sx, sz, RW, TMAX, OUT_END, chunks, spawn, spawnSplash, coreMat, foam, spawnFoam, mist, spawnMist, rb, arc };
     return grp;
   }
 
@@ -1441,12 +1603,14 @@
         ${DEPTH_GLSL}
         void main(){
           // 여울(기울어 흐르는 곳)은 빠르고 하얗게 부서진다
-          float rapid = smoothstep(0.06, 0.3, vSlope);
+          float rapid = smoothstep(0.3, 0.55, vSlope); // 30°를 넘어야 하얀 급류 (완만한 여울은 바닥이 비치는 맑은 물)
           float speed = min(3.0, mix(0.25, 1.7, vU * vU) + rapid * 1.8);
-          vec3 n1 = texture2D(uNormals, vec2(vUv.x * 0.9, vUv.y * 0.55 - uTime * speed * 0.6)).rgb * 2.0 - 1.0;
-          vec3 n2 = texture2D(uNormals, vec2(vUv.x * 2.1 + 0.4, vUv.y * 1.2 - uTime * speed)).rgb * 2.0 - 1.0;
-          vec4 st = texture2D(uStreak, vec2(vUv.x * 1.3, vUv.y * 0.45 - uTime * speed * 0.55));
-          vec4 st2 = texture2D(uStreak, vec2(vUv.x * 2.4 + 0.3, vUv.y * 0.9 - uTime * speed * 0.8));
+          // 잔물결(노멀맵)은 결이 고와서 빨리 밀면 25fps에서 거꾸로 기는 듯 보인다 → 느리게. 속도감은 굵은 거품 줄이 맡는다
+          float nsp = min(speed, 0.5);
+          vec3 n1 = texture2D(uNormals, vec2(vUv.x * 0.9, vUv.y * 0.55 - uTime * nsp * 0.6)).rgb * 2.0 - 1.0;
+          vec3 n2 = texture2D(uNormals, vec2(vUv.x * 2.1 + 0.4, vUv.y * 1.2 - uTime * nsp)).rgb * 2.0 - 1.0;
+          vec4 st = texture2D(uStreak, vec2(vUv.x * 1.3, vUv.y * 0.3 - uTime * speed * 0.37));
+          vec4 st2 = texture2D(uStreak, vec2(vUv.x * 2.4 + 0.3, vUv.y * 0.3 - uTime * speed * 0.27));
           float th = waterThick();
           vec3 V = normalize(cameraPosition - vW);
           float fr = pow(1.0 - abs(V.y), 3.0);
@@ -1463,7 +1627,7 @@
           float shore = smoothstep(0.22, 0.0, th) * (0.35 + st.r * 0.6) * (1.0 - rapid * 0.9); // 여울은 얕아도 물가 거품 얼룩을 찍지 않는다
           // 여울 물살: 흐름 방향으로 길게 늘인 줄무늬 두 겹 (짧게 쓰면 점박이 무늬가 찍혀 보였다) + 사이사이 비치는 물빛
           vec4 wa = texture2D(uStreak, vec2(vUv.x * 1.1 + 0.13, vUv.y * 0.15 - uTime * speed * 0.2));
-          vec4 wb = texture2D(uStreak, vec2(vUv.x * 2.3 + 0.61, vUv.y * 0.26 - uTime * speed * 0.33));
+          vec4 wb = texture2D(uStreak, vec2(vUv.x * 2.3 + 0.61, vUv.y * 0.2 - uTime * speed * 0.25));
           float white = rapid * (0.1 + smoothstep(0.35, 0.82, wa.r * 0.62 + wb.g * 0.58) * 0.72) * (0.8 + 0.2 * n1.x);
           boil *= 1.0 - rapid * 0.6;
           trails *= 1.0 - rapid * 0.7;
@@ -1473,8 +1637,8 @@
           col = mix(col, vec3(0.97, 0.99, 1.0), smoothstep(0.955, 1.0, vU) * (0.5 + st.r * 0.5));  // 넘어가는 물마루
           col += uSky * pow(max(0.0, n1.x * 0.5 + n2.y * 0.5), 6.0) * 0.6;         // 잔물결 반짝임
           // 여울: 공기 섞인 밝은 옥빛 물 (얕아서 바닥이 훤히 비치면 회색 자갈밭처럼 보였다)
-          col = mix(col, mix(vec3(0.5, 0.72, 0.7), vec3(0.96, 0.98, 1.0), white), rapid * 0.55);
-          float alpha = max(max(mix(0.5, 0.93, smoothstep(0.0, 0.7, th)), foam * 0.95), rapid * 0.88) * smoothstep(0.0, mix(0.16, 0.05, rapid), th);
+          col = mix(col, mix(vec3(0.42, 0.64, 0.62), vec3(0.96, 0.98, 1.0), white), rapid * 0.38);
+          float alpha = max(max(mix(0.5, 0.93, smoothstep(0.0, 0.7, th)), foam * 0.95), rapid * 0.72) * smoothstep(0.0, mix(0.16, 0.05, rapid), th);
           alpha *= vFade; // 0번(호수 출구)은 호수 가장자리와 서로 스며든다
           gl_FragColor = vec4(col * uLight, alpha);
           #include <encodings_fragment>
@@ -1496,7 +1660,7 @@
           pos.push(sm.x + sm.nx * o, sm.L, sm.z + sm.nz * o);
           uv.push(t, sm.s);
           au.push(sm.u);
-          ab.push(k > 0 && !p.cascade ? 1 : 0); // 급류엔 낙수 거품(소)이 없다: 하얀 물살은 기울기(aSlope)로
+          ab.push(k > 0 ? 1 : 0); // 여울·소의 시작 = 위 폭포가 떨어지는 자리: 하얗게 끓는다
           af.push(1);
           ac.push(o - curC);
           asl.push(slope);
@@ -1531,48 +1695,24 @@
 
     // --- 작은 폭포: 턱마다 물마루가 부풀었다가 가닥으로 찢어지며 떨어진다 (큰 폭포와 같은 셰이더) ---
     const G = 9.8, falls = [];
+    const coarseS = !!(window.matchMedia && matchMedia('(pointer: coarse)').matches);
     st.pools.forEach((p, k) => {
       const lip = secs.filter((sm) => sm.k === k && !sm.tail).pop();
       if (!lip) return;
       const nxt = secs.find((sm) => sm.k === k + 1 && !sm.tail);
       const nextL = nxt ? nxt.L : st.shelfL, d = lip.L - nextL;
       if (d < 0.35) return;
-      const TMAX = Math.sqrt((2 * d) / G), hh = (q) => hash(k, q, seed);
-      const strandSide = hh(3) < 0.5 ? -1 : 1, nc = p.nc || 0, nh = p.nh || lip.ww;
-      const defs = [
-        { lat: nc, w: nh * 2 * 1.02, v0: 1.0 + hh(1) * 0.4, op: 0.96, seed: hh(4) * 10, speed: 1 },
-        { lat: nc + (hh(2) - 0.5) * 0.2, w: nh * 2 * 0.72, v0: 0.72, op: 0.5, seed: hh(5) * 10, speed: 0.85 },
-        { lat: nc + strandSide * nh * 0.86, w: 0.16 + hh(6) * 0.1, v0: 0.3 + hh(7) * 0.3, op: 0.8, seed: hh(8) * 10, speed: 0.8 },
-      ];
-      for (const df of defs) {
-        const NC = Math.max(3, Math.round(df.w * 5)), NA = df.lead ? 4 : 0, NF = 18, pos = [], uv = [], idx = [];
-        for (let j = 0; j <= NA + NF; j++)
-          for (let i = 0; i <= NC; i++) {
-            const u = i / NC;
-            let x, y, z, vv;
-            if (j < NA) {
-              const back = 0.45 * (1 - j / NA), lat = df.lat + (u - 0.5) * df.w;
-              x = lip.x + lip.nx * lat - lip.tx * back; z = lip.z + lip.nz * lat - lip.tz * back; y = lip.L + 0.012; vv = -(back / 0.45) * 0.25;
-            } else {
-              const tau = (TMAX * (j - NA)) / NF, drop = 0.5 * G * tau * tau, lat = df.lat + (u - 0.5) * df.w * (1 + (0.16 * drop) / d), out = 0.02 + df.v0 * tau;
-              x = lip.x + lip.nx * lat + lip.tx * out; z = lip.z + lip.nz * lat + lip.tz * out; y = lip.L + 0.01 - drop; vv = drop / d;
-            }
-            pos.push(x, y, z); uv.push(u, vv);
-            if (i < NC && j < NA + NF) { const a0 = j * (NC + 1) + i; idx.push(a0, a0 + NC + 1, a0 + 1, a0 + 1, a0 + NC + 1, a0 + NC + 2); }
-          }
-        const g = new T.BufferGeometry();
-        g.setAttribute('position', new T.Float32BufferAttribute(pos, 3));
-        g.setAttribute('uv', new T.Float32BufferAttribute(uv, 2));
-        g.setIndex(idx);
-        const mesh = new T.Mesh(g, fallSheetMat({ w: df.w, seed: df.seed, op: df.op, speed: df.speed, rag: 1 }, d));
-        mesh.renderOrder = 6;
-        mesh.frustumCulled = false;
-        grp.add(mesh);
-      }
-      const out = 0.02 + defs[0].v0 * TMAX;
-      falls.push({ x: lip.x + lip.tx * out, z: lip.z + lip.tz * out, y: nextL, tx: lip.tx, tz: lip.tz, nx: lip.nx, nz: lip.nz, w: defs[0].w, d, lip, lat: nc, nh });
+      const hh = (q) => hash(k, q, seed), nc = p.nc || 0, nh = p.nh || lip.ww;
+      // 큰 폭포와 같은 물기둥: 급류에서 오는 물이라 처음부터 조금 하얗고, 폭에 비례해 두껍다
+      const W = nh * 2 * 1.02, v0c = 0.9 + hh(1) * 0.35, T0 = 0.2 + 0.14 * Math.min(1, d / 2.5);
+      const core = fallCore({
+        at: (lat, s) => [lip.x + lip.nx * (nc + lat) + lip.tx * s, lip.z + lip.nz * (nc + lat) + lip.tz * s],
+        topY: lip.L + 0.01, H: d, W, T0, v0c, sup: 0.55, narrow: 1, aer0: 0.4, supA: 0.5, sd: k * 3 + 1, nc: 18, na: 4, nf: 30,
+      });
+      grp.add(core.mesh);
+      const out = core.OUT_END;
+      falls.push({ x: lip.x + lip.tx * out, z: lip.z + lip.tz * out, y: nextL, tx: lip.tx, tz: lip.tz, nx: lip.nx, nz: lip.nz, w: W, d, lip, lat: nc, nh, core });
     });
-
     // 급류가 가파르다가 덜 가팔라지는 자리 = 물이 바위에 부딪혀 하얗게 튀는 곳 → 물보라·거품, 양옆과 물속에 바위
     {
       const cas = secs.filter((sm) => !sm.tail && st.pools[sm.k] && st.pools[sm.k].cascade);
@@ -1612,13 +1752,16 @@
     // 여울 속 바위: 바닥에 앉아 물 위로 머리만 내민다 (물이 부딪혀 갈라지며 하얗게 부서진다)
     st.pools.forEach((p, k) => {
       if (k === 0) return;
-      const n = hash(k, 44, seed) < 0.45 ? 2 : 3;
+      const n = 3 + Math.floor(hash(k, 44, seed) * 3); // 3~5개: 물가와 물길 가운데
       for (let q = 0; q < n; q++) {
-        const sm = secs.find((x) => x.k === k && !x.tail && x.u >= 0.3 + q * 0.22);
-        if (!sm || sm.u > 0.8) continue;
-        const sd = hash(k, 45 + q, seed) < 0.5 ? -1 : 1, o = sd * (sd < 0 ? sm.secL : sm.secR).shore * (0.4 + hash(k, 47 + q, seed) * 0.45);
-        const sz = 0.17 + hash(k, 46 + q, seed) * 0.2;
-        rocks.push({ x: sm.x + sm.nx * o, z: sm.z + sm.nz * o, y: sm.L - sz * 0.3, s: sz, v: (k + q + 1) % 3 });
+        const sm = secs.find((x) => x.k === k && !x.tail && x.u >= 0.22 + q * (0.6 / n));
+        if (!sm || sm.u > 0.86) continue;
+        const sd = hash(k, 45 + q, seed) < 0.5 ? -1 : 1, mid = hash(k, 48 + q, seed) < 0.5;
+        const o = sd * (sd < 0 ? sm.secL : sm.secR).shore * (mid ? 0.1 + hash(k, 47 + q, seed) * 0.4 : 0.55 + hash(k, 47 + q, seed) * 0.35);
+        const sz = (mid ? 0.22 : 0.17) + hash(k, 46 + q, seed) * 0.24;
+        rocks.push({ x: sm.x + sm.nx * o, z: sm.z + sm.nz * o, y: sm.L - sz * 0.35, s: sz, v: (k + q + 1) % 3 });
+        // 물길 가운데 돌 뒤엔 물이 갈라지며 하얗게 부서진다
+        if (mid && sz > 0.3) falls.push({ x: sm.x + sm.nx * o + sm.tx * sz * 0.9, z: sm.z + sm.nz * o + sm.tz * sz * 0.9, y: sm.L, tx: sm.tx, tz: sm.tz, nx: sm.nx, nz: sm.nz, w: sz * 1.6, d: 0.5, lip: sm, lat: 0, nh: sz * 0.8, splash: true });
       }
     });
     // 협곡 테두리: 굴러 내려와 걸린 돌 (가파른 벽 중간엔 두지 않는다: 벽에 붙어 떠 보인다)
@@ -1658,65 +1801,60 @@
     }
 
     // --- 낙수 지점 거품·물방울 ---
-    let foam = null, spawnFoam = null, spray = null;
+    let foam = null, spawnFoam = null, chunks = null, spawnChunk = null, spawnSplash = null;
     if (falls.length) {
       const pick = () => { let tw = 0; for (const f of falls) tw += f.w * f.d; let r = Math.random() * tw; for (const f of falls) { r -= f.w * f.d; if (r <= 0) return f; } return falls[0]; };
-      foam = foamSystem(Math.min(300, falls.length * 30), 0.62, fallTextures().foam);
+      foam = foamSystem(Math.min(300, falls.length * 30), 0.7, fallTextures().foam);
+      foam.mat.uniforms.uGrad.value = 0.4;
       spawnFoam = (sy, i) => {
         const f = pick(), j = f.lat + (Math.random() - 0.5) * f.w * 1.05, fw = 0.15 + Math.random() * 0.8, k = Math.min(1.5, 0.55 + f.d * 0.35);
         sy.P[i * 3] = f.x + f.nx * j; sy.P[i * 3 + 1] = f.y + 0.05 + Math.random() * 0.1; sy.P[i * 3 + 2] = f.z + f.nz * j;
         sy.vel[i * 3] = f.tx * fw + f.nx * (Math.random() - 0.5) * 0.4; sy.vel[i * 3 + 1] = (0.25 + Math.random() * 0.8) * k; sy.vel[i * 3 + 2] = f.tz * fw + f.nz * (Math.random() - 0.5) * 0.4;
         sy.life[i] = 0.6 + Math.random() * 0.8; sy.age[i] = 0;
-        sy.s0[i] = (0.18 + Math.random() * 0.3) * k; sy.R[i] = Math.random() * 6.28; sy.rs[i] = (Math.random() - 0.5) * 0.9;
+        sy.s0[i] = (0.22 + Math.random() * 0.36) * k; sy.R[i] = (Math.random() - 0.5) * 0.6; sy.rs[i] = (Math.random() - 0.5) * 0.5;
       };
       for (let i = 0; i < foam.n; i++) { spawnFoam(foam, i); foam.age[i] = Math.random() * foam.life[i]; }
       foam.mesh.renderOrder = 8;
       grp.add(foam.mesh);
-      // 물방울
-      const NP = Math.min(320, falls.length * 34), pp = new Float32Array(NP * 3), pa = new Float32Array(NP), psz = new Float32Array(NP), pv = new Float32Array(NP * 3), life = new Float32Array(NP), age = new Float32Array(NP);
-      const pg = new T.BufferGeometry();
-      pg.setAttribute('position', new T.BufferAttribute(pp, 3).setUsage(T.DynamicDrawUsage));
-      pg.setAttribute('aAlpha', new T.BufferAttribute(pa, 1).setUsage(T.DynamicDrawUsage));
-      pg.setAttribute('aSize', new T.BufferAttribute(psz, 1));
-      const pmat = new T.ShaderMaterial({
-        transparent: true, depthWrite: false,
-        uniforms: { uLight: fallLight, uVH: { value: 600 } },
-        vertexShader: 'attribute float aAlpha, aSize; uniform float uVH; varying float vA; void main(){ vec4 mv = modelViewMatrix * vec4(position,1.0); vA = aAlpha * smoothstep(0.7, 2.6, -mv.z); gl_PointSize = min(uVH * 0.014, aSize * uVH / max(0.5, -mv.z)); gl_Position = projectionMatrix * mv; }', // 코앞 물방울이 눈송이·공처럼 커지지 않게
-        fragmentShader: 'uniform vec3 uLight; varying float vA; void main(){ float d = length(gl_PointCoord - 0.5); gl_FragColor = vec4(vec3(1.0) * uLight, smoothstep(0.5, 0.05, d) * vA); \n#include <encodings_fragment>\n}',
-      });
-      const pts = new T.Points(pg, pmat);
-      pts.frustumCulled = false;
-      pts.renderOrder = 8;
-      grp.add(pts);
-      const sp = (k) => {
-        const f = pick(), j = f.lat + (Math.random() - 0.5) * f.w, vin = 0.3 + Math.random() * 1.4, lx = (Math.random() - 0.5) * 0.9, kk = Math.min(1.4, 0.5 + f.d * 0.4);
-        pp[k * 3] = f.x + f.nx * j; pp[k * 3 + 1] = f.y + 0.05; pp[k * 3 + 2] = f.z + f.nz * j;
-        pv[k * 3] = f.tx * vin + f.nx * lx; pv[k * 3 + 1] = (0.8 + Math.random() * Math.random() * 2.6) * kk; pv[k * 3 + 2] = f.tz * vin + f.nz * lx;
-        life[k] = 0.4 + Math.random() * 0.6; age[k] = 0; psz[k] = 0.025 + Math.random() * Math.random() * 0.07;
-      };
-      for (let k = 0; k < NP; k++) { sp(k); age[k] = Math.random() * life[k]; }
-      spray = { NP, pp, pa, pv, life, age, sp, pg, pmat };
+      // 물덩이: 턱마다 떨어지는 물덩이 + 바닥에 튀는 물방울 (큰 폭포와 같은 입자)
+      const reals = falls.filter((f) => f.core);
+      const pickF = () => { let tw = 0; for (const f of reals) tw += f.w * Math.sqrt(f.d); let r = Math.random() * tw; for (const f of reals) { r -= f.w * Math.sqrt(f.d); if (r <= 0) return f; } return reals[0]; };
+      if (reals.length) {
+        chunks = chunkSystem(coarseS ? 320 : 640, coarseS ? 50 : 100);
+        const { pp, pv, pa, psz, life, age, floor } = chunks;
+        spawnChunk = (k) => {
+          const f = pickF(), c = f.core, L = f.lip, edge = Math.random() < 0.4;
+          const q = edge ? (Math.random() < 0.5 ? -1 : 1) * (0.8 + Math.random() * 0.3) : (Math.random() + Math.random() - 1) * 0.95;
+          const qq = Math.min(1, Math.abs(q)), v0 = c.v0At(qq) * (0.9 + Math.random() * 0.25), th0 = c.thickAt(qq);
+          const tau0 = Math.random() * 0.3 * c.TMAX, drop = 0.5 * G * tau0 * tau0, out = v0 * tau0 + 0.04 + Math.random() * 0.12 + th0 * 0.5;
+          const lat = f.lat + q * c.HW, lx = (Math.random() - 0.5) * 0.3;
+          pp[k * 3] = L.x + L.nx * lat + L.tx * out; pp[k * 3 + 1] = L.L + 0.03 - drop; pp[k * 3 + 2] = L.z + L.nz * lat + L.tz * out;
+          pv[k * 3] = L.tx * v0 + L.nx * lx; pv[k * 3 + 1] = -G * tau0; pv[k * 3 + 2] = L.tz * v0 + L.nz * lx;
+          pa[k] = edge ? 0.6 + Math.random() * 0.3 : 0.35 + Math.random() * 0.4;
+          psz[k] = (0.45 + Math.random() * 0.5) * Math.min(1, 0.6 + f.w * 0.25);
+          life[k] = 99; age[k] = 0; floor[k] = f.y;
+        };
+        spawnSplash = (k) => {
+          const f = pickF(), j = f.lat + (Math.random() - 0.5) * f.w, vin = 0.2 + Math.random() * 1.0, lx = (Math.random() - 0.5) * 0.8, kk = Math.min(1.3, 0.5 + f.d * 0.35);
+          pp[k * 3] = f.x + f.nx * j; pp[k * 3 + 1] = f.y + 0.06; pp[k * 3 + 2] = f.z + f.nz * j;
+          pv[k * 3] = f.tx * vin + f.nx * lx; pv[k * 3 + 1] = (0.4 + Math.random() * Math.random() * 1.4) * kk; pv[k * 3 + 2] = f.tz * vin + f.nz * lx;
+          pa[k] = 0.5 + Math.random() * 0.3;
+          psz[k] = 0.35 + Math.random() * 0.4;
+          life[k] = 0.3 + Math.random() * 0.35; age[k] = 0; floor[k] = f.y;
+        };
+        for (let k = 0; k < chunks.NP; k++) { spawnChunk(k); const f = reals[0]; const tau = Math.random() * f.core.TMAX; pp[k * 3 + 1] -= 0.5 * G * tau * tau; pv[k * 3 + 1] -= G * tau; }
+        for (let k = chunks.NP; k < chunks.NP + chunks.NS; k++) { spawnSplash(k); age[k] = Math.random() * life[k]; }
+        grp.add(chunks.mesh);
+      }
     }
-    streamFx = { foam, spawnFoam, spray, falls };
+    streamFx = { foam, spawnFoam, chunks, spawnChunk, spawnSplash, falls };
     return grp;
   }
   function updateStream(dt) {
     if (!streamFx) return;
     const near = field.crater ? ss(120, 40, camera.position.distanceTo(new T.Vector3(field.crater.x, field.crater.level, field.crater.z)) * 0.6) : 1;
     if (streamFx.foam) { stepFoam(streamFx.foam, dt, streamFx.spawnFoam, 1.2, 1.4, 1.1); streamFx.foam.mat.uniforms.uNear.value = near; }
-    const s = streamFx.spray;
-    if (s) {
-      s.pmat.uniforms.uVH.value = renderer.domElement.height / (2 * Math.tan((camera.fov * Math.PI) / 360));
-      for (let k = 0; k < s.NP; k++) {
-        s.age[k] += dt;
-        if (s.age[k] > s.life[k]) s.sp(k);
-        s.pv[k * 3 + 1] -= 9.8 * dt * 0.6;
-        s.pp[k * 3] += s.pv[k * 3] * dt; s.pp[k * 3 + 1] += s.pv[k * 3 + 1] * dt; s.pp[k * 3 + 2] += s.pv[k * 3 + 2] * dt;
-        s.pa[k] = Math.sin(Math.PI * Math.min(1, s.age[k] / s.life[k])) * 0.7 * near;
-      }
-      s.pg.attributes.position.needsUpdate = true;
-      s.pg.attributes.aAlpha.needsUpdate = true;
-    }
+    if (streamFx.chunks) streamFx.chunks.step(dt, streamFx.spawnChunk, streamFx.spawnSplash);
   }
 
   const _fc = new T.Color();
@@ -1731,24 +1869,13 @@
     { const v = fallLight.value, l = v.r * 0.3 + v.g * 0.59 + v.b * 0.11; v.setRGB(l + (v.r - l) * 0.45, l + (v.g - l) * 0.45, l + (v.b - l) * 0.45); } // 노을빛에 물이 흙탕물처럼 물들지 않게
     const mx = Math.max(fallLight.value.r, fallLight.value.g, fallLight.value.b);
     if (mx > 1) fallLight.value.multiplyScalar(1 / mx);
-    f.pmat.uniforms.uVH.value = renderer.domElement.height / (2 * Math.tan((camera.fov * Math.PI) / 360));
-    // 물방울
-    const pp = f.pp, pv = f.pv;
-    for (let k = 0; k < f.NP; k++) {
-      f.age[k] += dt;
-      if (f.age[k] > f.life[k]) f.spawn(k);
-      pv[k * 3 + 1] -= 9.8 * dt * 0.6;
-      const drag = 1 - dt * 0.8;
-      pv[k * 3] *= drag; pv[k * 3 + 2] *= drag;
-      pp[k * 3] += pv[k * 3] * dt; pp[k * 3 + 1] += pv[k * 3 + 1] * dt; pp[k * 3 + 2] += pv[k * 3 + 2] * dt;
-      if (pp[k * 3 + 1] < f.poolY) { pp[k * 3 + 1] = f.poolY; f.age[k] = f.life[k] + 1; }
-      f.pa[k] = Math.sin(Math.PI * Math.min(1, f.age[k] / f.life[k])) * 0.8;
-    }
-    f.pg.attributes.position.needsUpdate = true;
-    f.pg.attributes.aAlpha.needsUpdate = true;
-    // 거품·물안개 (멀리서는 물안개를 옅게)
-    stepFoam(f.foam, dt, f.spawnFoam, 0.9, 1.3, 1.7);
-    stepFoam(f.mist, dt, f.spawnMist, -0.05, 0.35, 1.6);
+    // 해 방향(물기둥 조명·반사), 밤의 바위 발광
+    fallSun.value.copy(key.position).normalize();
+    for (const m of rockMats) m.emissiveIntensity = curPal ? curPal.stars * 0.5 : 0;
+    f.chunks.step(dt, f.spawn, f.spawnSplash);
+    // 밑동 플룸·물안개 (멀리서는 물안개를 옅게)
+    stepFoam(f.foam, dt, f.spawnFoam, 1.7, 1.1, 1.15);
+    stepFoam(f.mist, dt, f.spawnMist, 0.0, 0.5, 1.25);
     f.mist.mat.uniforms.uNear.value = ss(150, 45, camera.position.distanceTo(f.imp));
     // 무지개: 해가 떠 있을 때만, 아주 은은하게
     const sunny = curPal ? (1 - curPal.stars) * ss(1.3, 2.0, key.intensity) : 0;
@@ -1880,10 +2007,10 @@
     const pick = (vi) => (V[vi] ? vi : 1 - vi);
     const items = [];
     // 놓을 자리: (바닥 가운데 뒤쪽) 기준점 x,y,z · 바라보는 방향 yaw · 높이 hgt. 걸어서 뚫고 지나가지 않게 col이면 충돌 원
-    const add = (vi, x, y, z, yaw, hgt, col) => {
+    const add = (vi, x, y, z, yaw, hgt, col, lean) => {
       vi = pick(vi);
       const v = V[vi], s = hgt / v.h;
-      items.push({ vi, x, y, z, yaw, s });
+      items.push({ vi, x, y, z, yaw, s, lean: lean || 0 });
       if (col) trunks.push({ x: x + Math.sin(yaw) * v.d * s * 0.5, z: z + Math.cos(yaw) * v.d * s * 0.5, r: Math.max(0.3, v.w * s * 0.3) });
     };
     const R0 = fl.BR, fx = fl.fx, fz = fl.fz, sx = -fz, sz = fx, RW = R0 + 0.2, poolY = fl.poolY;
@@ -1892,19 +2019,20 @@
     // 1) 폭포 둘레 절벽 테두리: 바위 덩어리가 테두리 위로 솟고 절벽면으로 흘러내린다
     let n = 0;
     for (const sd of [-1, 1])
-      for (const ph of [0.66, 0.98, 1.32, 1.68]) {
+      for (const ph of [0.9, 1.5]) {
         const phi = ph * sd, [ox, oz] = arc(phi, R0 + 2.8), outer = heightAt(ox, oz), lk = lipK(phi);
         const capH = Math.max(poolY + 0.2, outer * (1 - lk) + fl.top * lk), hide = ss(poolY + 1.4, poolY + 0.6, outer) * (1 - lk);
         n++;
         if (hide > 0.4 || capH - poolY < 2.2) continue;
         const hgt = Math.max(1.6, Math.min(3.6, 0.33 * (capH - poolY) + 1.3)) * (0.85 + hash(n, 31, seed) * 0.3);
-        const [x, z] = arc(phi + (hash(n, 32, seed) - 0.5) * 0.12, RW + 0.75);
-        add(n % 2, x, capH - hgt * 0.62, z, Math.atan2(fl.cx - x, fl.cz - z) + (hash(n, 33, seed) - 0.5) * 0.5, hgt, true);
+        // 벽 속에 묻고 위를 뒤로 기울인다 (벽 밖에 세워 두면 스티커처럼 떠 보이고 밑면이 직선으로 드러났다)
+        const [x, z] = arc(phi + (hash(n, 32, seed) - 0.5) * 0.12, RW + 0.05);
+        add(n % 2, x, capH - hgt * 0.95, z, Math.atan2(fl.cx - x, fl.cz - z) + (hash(n, 33, seed) - 0.5) * 0.5, hgt, true, -(0.2 + hash(n, 34, seed) * 0.25));
       }
     // 2) 폭포 턱 양옆: 물이 떨어지는 입구를 바위가 감싼다 (첫 화면 쪽을 보며)
     for (const sd of [-1, 1]) {
-      const [x, z] = arc((sd * 3.9) / RW, RW + 1.0);
-      add(sd > 0 ? 0 : 1, x, fl.top - 1.0, z, Math.atan2(fx, fz) - sd * 0.45, 2.8, true);
+      const [x, z] = arc((sd * 3.6) / RW, RW + 0.35);
+      add(sd > 0 ? 0 : 1, x, fl.top - 1.7, z, Math.atan2(fx, fz) - sd * 0.45, 2.8, true, -0.22);
     }
     // 3) 급류 골짜기: 높은 쪽 벽에 물을 바라보는 바위면 / 4) 호수 출구 양옆
     if (st && st.secs) {
@@ -1919,17 +2047,20 @@
       const o0 = field.crater && st.secs.find((sm) => Math.hypot(sm.x - field.crater.x, sm.z - field.crater.z) > field.crater.R + 0.3);
       if (o0) for (const sd of [-1, 1]) { const o = sd * (Math.max(o0.secL.shore, o0.secR.shore) + 0.9); add(1, o0.x + o0.nx * o, o0.L - 0.35, o0.z + o0.nz * o, Math.atan2(o0.tx, o0.tz) - sd * 0.5, 1.4, true); }
     }
-    const grp = new T.Group(), m4 = new T.Matrix4(), mY = new T.Matrix4(), mS = new T.Matrix4(), mO = new T.Matrix4(), mX = new T.Matrix4();
+    const grp = new T.Group(), m4 = new T.Matrix4(), mY = new T.Matrix4(), mS = new T.Matrix4(), mO = new T.Matrix4(), mX = new T.Matrix4(), mL = new T.Matrix4();
+    rockMats = [];
     V.forEach((v, vi) => {
       const list = v ? items.filter((it) => it.vi === vi) : [];
       if (!list.length) return;
       // 스캔 바위는 햇빛 아래 밝은 크림색으로 떠 보였다 → 섬 절벽 바위 톤(어둡고 따뜻하게)에 맞춘다
       v.part.mat.color.setRGB(0.66, 0.6, 0.53);
       v.part.mat.envMapIntensity = 0.7;
+      v.part.mat.emissive = new T.Color('#33404f'); // 밤엔 절벽 벽과 같이 은은히 (검은 종이처럼 보이지 않게)
+      rockMats.push(v.part.mat);
       const im = new T.InstancedMesh(v.part.geo, v.part.mat, list.length), c = new T.Vector3();
       let r = 0;
       list.forEach((it, i) => {
-        m4.makeTranslation(it.x, it.y, it.z).multiply(mY.makeRotationY(it.yaw)).multiply(mS.makeScale(it.s, it.s, it.s)).multiply(mO.makeTranslation(-v.cx, -v.y0, -v.z0)).multiply(mX.makeRotationX(v.tilt));
+        m4.makeTranslation(it.x, it.y, it.z).multiply(mY.makeRotationY(it.yaw)).multiply(mL.makeRotationX(it.lean)).multiply(mS.makeScale(it.s, it.s, it.s)).multiply(mO.makeTranslation(-v.cx, -v.y0, -v.z0)).multiply(mX.makeRotationX(v.tilt));
         im.setMatrixAt(i, m4);
         c.x += it.x / list.length; c.y += it.y / list.length; c.z += it.z / list.length;
       });
@@ -1946,7 +2077,7 @@
 
   // ---------- 식생: 야자수·고사리·풀 덤불 ----------
   function buildDecor() {
-    const L = { palm: [], broad: [], banana: [], monstera: [], fern: [], rock: [], grass: [] };
+    const L = { palm: [], broad: [], banana: [], monstera: [], fern: [], rock: [], grass: [], drift: [], shell: [] };
     trunks = [];
     const rv = field.river || [];
     const nearRiver = (x, z) => rv.some((r) => (x - r.x) ** 2 + (z - r.z) ** 2 < 4.4);
@@ -1975,7 +2106,7 @@
     const ok = (x, z, minH, maxH) => { const h = heightAt(x, z); return h > minH && h < maxH && !nearRiver(x, z) && !inBasin(x, z); };
     const tree = (list, x, z, h, r, v, rad) => {
       // 줄기끼리 최소한 사람 하나 지나갈 틈(0.34)은 남긴다
-      if (fallView(x, z) || trunks.some((t) => (x - t.x) ** 2 + (z - t.z) ** 2 < Math.max(0.8, (t.r + rad + 0.34) ** 2))) return;
+      if (heightAt(x, z) > 13 || fallView(x, z) || trunks.some((t) => (x - t.x) ** 2 + (z - t.z) ** 2 < Math.max(0.8, (t.r + rad + 0.34) ** 2))) return;
       const bs = rad * 1.6, base = Math.min(heightAt(x, z), heightAt(x + bs, z), heightAt(x - bs, z), heightAt(x, z + bs), heightAt(x, z - bs)) - 0.03;
       list.push({ x, z, y: base, h, r, v });
       trunks.push({ x, z, r: rad, h, y: base });
@@ -1990,7 +2121,7 @@
       jungle: [0.09, 0.32, 0.14, 0, 0.22, 0.004, 0.02],
       highland: [0, 0.05, 0, 0, 0.1, 0.05, 0.2],
     };
-    for (const p of plots) {
+    for (const p of cellsOf(plots)) {
       const cc = cellCenter(p);
       const hp = (k) => hash(p.id, k, seed);
       const outward = Math.atan2(cc.x, cc.z);
@@ -2005,12 +2136,14 @@
         if (bm === 'meadow' && vnoise(x * 0.07, z * 0.07, seed + 61) > 0.64) bm = 'grove';
         const P = TABLE[bm], thin = bm === 'highland' ? ss(8.5, 15, h) : 0;
         let roll = hp(k * 13 + 5), acc = 0;
-        const pick = (i) => { acc += P[i] * (1 - thin * 0.7); return roll < acc; };
+        // 나무는 군락과 빈터로: 큰 결 노이즈로 숲이 뭉치고 사이사이 트인 풀밭 (고른 간격이면 심어 놓은 과수원처럼 보였다)
+        const clus = 0.3 + 1.6 * ss(0.36, 0.7, vnoise(x * 0.045, z * 0.045, seed + 303));
+        const pick = (i) => { acc += P[i] * (1 - thin * 0.7) * (i < 2 ? clus : 1); return roll < acc; };
         const r = hp(k * 13 + 6) * 6.28, sz = hp(k * 13 + 7);
         // 초원의 고사리·키 큰 풀은 군락으로 모인다
         const patch = bm === 'meadow' ? 0.4 + ss(0.45, 0.72, vnoise(x * 0.09, z * 0.09, seed + 51)) * 1.6 : 1;
-        if (pick(0)) tree(L.palm, x, z, 2.7 + sz * 1.5, bm === 'coast' ? outward + (sz - 0.5) * 1.3 : r, k % 4, 0.042 * (2.7 + sz * 1.5));
-        else if (pick(1)) tree(L.broad, x, z, (bm === 'grove' ? 4.4 : 3.4) + sz * 1.8, r, k % 3, 0.048 * ((bm === 'grove' ? 4.4 : 3.4) + sz * 1.8));
+        if (pick(0)) tree(L.palm, x, z, 2.7 + sz * 1.5, bm === 'coast' ? outward + (sz - 0.5) * 1.3 : r, k % 4, 0.024 * (2.7 + sz * 1.5));
+        else if (pick(1)) tree(L.broad, x, z, (bm === 'grove' ? 4.4 : 3.4) + sz * 1.8, r, k % 3, 0.024 * ((bm === 'grove' ? 4.4 : 3.4) + sz * 1.8));
         else if (pick(2)) L.banana.push({ x, z, y: h, h: 1.4 + sz * 0.6, r, v: k % 2 });
         else if (pick(3)) L.monstera.push({ x, z, y: h, h: 0.6 + sz * 0.45, r });
         else if (roll < acc + P[4] * patch) { acc += P[4] * patch; L.fern.push({ x, z, y: h, h: 0.3 + sz * 0.3, r }); }
@@ -2038,21 +2171,50 @@
           }
         }
       });
-    // 협곡 테두리 바깥: 고사리·풀이 줄지어 자란다
+    // 폭포 둘레: 물보라로 늘 젖은 곳이라 가장 우거진다 — 소 둘레 고리(강 출구 쪽은 비움)에 고사리·바나나·활엽수, 절벽 턱 위에 고사리
+    if (fz0) {
+      const hpF = (k) => hash(k, 777, seed);
+      for (let k = 0; k < 260; k++) {
+        const a = hpF(k * 5) * 6.283, rr = fz0.BR + 2.8 + hpF(k * 5 + 1) * 6.5;
+        const x = fz0.cx + Math.sin(a) * rr, z = fz0.cz + Math.cos(a) * rr, h = heightAt(x, z);
+        const ax = (x - fz0.cx) * fz0.fx + (z - fz0.cz) * fz0.fz; // 앞(강 출구·첫 화면 쪽)은 비운다
+        if (ax > fz0.BR * 0.35 || h < fz0.poolY + 0.3 || nearRiver(x, z) || onShelf(x, z) || inGorge(x, z, 0.4)) continue;
+        if (Math.hypot(heightAt(x + 0.4, z) - heightAt(x - 0.4, z), heightAt(x, z + 0.4) - heightAt(x, z - 0.4)) / 0.8 > 1.3) continue;
+        const r = hpF(k * 5 + 2) * 6.28, sz = hpF(k * 5 + 3), roll = hpF(k * 5 + 4);
+        if (roll < 0.5) L.fern.push({ x, z, y: h, h: 0.3 + sz * 0.35, r });
+        else if (roll < 0.68) L.banana.push({ x, z, y: h, h: 1.3 + sz * 0.7, r, v: k % 2 });
+        else if (roll < 0.8) tree(L.broad, x, z, 3.2 + sz * 1.6, r, k % 3, 0.024 * (3.2 + sz * 1.6));
+        else if (roll < 0.86) tree(L.palm, x, z, 2.6 + sz * 1.4, r, k % 4, 0.024 * (2.6 + sz * 1.4));
+        else L.grass.push({ x, z, y: h, w: 0.4 + sz * 0.3, h: 0.14 + sz * 0.08, r });
+      }
+      // 절벽 턱(폭포 양옆 바위 테두리 위): 물보라를 맞는 고사리
+      const RWc = fz0.BR + 0.2, sx0 = -fz0.fz, sz0 = fz0.fx;
+      for (let k = 0; k < 70; k++) {
+        const sd = k % 2 ? -1 : 1, phi = sd * (0.5 + hpF(k * 3 + 900) * 1.6), rr = RWc + 0.9 + hpF(k * 3 + 901) * 1.7;
+        const x = fz0.cx + rr * (-fz0.fx * Math.cos(phi) + sx0 * Math.sin(phi)), z = fz0.cz + rr * (-fz0.fz * Math.cos(phi) + sz0 * Math.sin(phi));
+        const cq = fallCapQuery(x, z);
+        if (!cq || cq.water !== null || cq.floor < fz0.poolY + 1.5) continue;
+        if (hpF(k * 3 + 902) < 0.75) L.fern.push({ x, z, y: cq.floor, h: 0.26 + hpF(k * 3 + 903) * 0.3, r: hpF(k * 3 + 904) * 6.28 });
+        else L.grass.push({ x, z, y: cq.floor, w: 0.38, h: 0.16, r: hpF(k * 3 + 904) * 6.28 });
+      }
+    }
+    // 협곡 테두리 바깥: 고사리·풀이 줄지어 자란다 (턱 근처는 더 촘촘히)
     if (stS)
       stS.forEach((sm, i) => {
-        if (sm.tail || i % 3 || inCrater(sm.x, sm.z, -99)) return;
+        if (sm.tail || i % 2 || inCrater(sm.x, sm.z, -99)) return;
         for (const sd of [-1, 1]) {
           const q = stSec[i], ext = q ? (sd < 0 ? q.L : q.R).o[(sd < 0 ? q.L : q.R).o.length - 1] : field.stream.WO;
           const o = ext + 0.25 + hash(i, sd + 60, seed) * 0.8, x = sm.x + sm.nx * sd * o, z = sm.z + sm.nz * sd * o, h = heightAt(x, z);
           if (inGorge(x, z, 0.1) || (fz0 && Math.hypot(x - fz0.cx, z - fz0.cz) < fz0.BR + 3)) continue;
-          if (hash(i, sd + 62, seed) < 0.65) L.fern.push({ x, z, y: h, h: 0.3 + hash(i, sd + 63, seed) * 0.3, r: hash(i, sd + 64, seed) * 6.28 });
+          const rr2 = hash(i, sd + 62, seed);
+          if (rr2 < 0.7) L.fern.push({ x, z, y: h, h: 0.3 + hash(i, sd + 63, seed) * 0.3, r: hash(i, sd + 64, seed) * 6.28 });
+          else if (rr2 < 0.82) L.banana.push({ x, z, y: h, h: 1.2 + hash(i, sd + 63, seed) * 0.6, r: hash(i, sd + 64, seed) * 6.28, v: i % 2 });
           const gx = x + sm.nx * sd * 0.5, gz = z + sm.nz * sd * 0.5;
           L.grass.push({ x: gx, z: gz, y: heightAt(gx, gz), w: 0.45, h: 0.2 + hash(i, sd + 65, seed) * 0.12, r: hash(i, sd + 66, seed) * 6.28 });
         }
       });
     // 풀밭: 초원·고원·숲 가장자리에 작은 풀 포기를 촘촘히 (군락 무늬로 모였다 흩어졌다). 키는 사람(0.44) 발목~정강이
-    for (const p of plots) {
+    for (const p of cellsOf(plots)) {
       const cc = cellCenter(p), hp = (k) => hash(p.id, k + 500, seed);
       for (let k = 0; k < 64; k++) {
         const x = cc.x + (hp(k * 7) - 0.5) * S, z = cc.z + (hp(k * 7 + 1) - 0.5) * S, h = heightAt(x, z);
@@ -2062,6 +2224,30 @@
         if (hp(k * 7 + 2) > dens * (0.22 + patch * 0.95)) continue;
         if (Math.hypot(heightAt(x + 0.3, z) - heightAt(x - 0.3, z), heightAt(x, z + 0.3) - heightAt(x, z - 0.3)) / 0.6 > 0.85) continue;
         L.grass.push({ x, z, y: h, w: 0.2 + hp(k * 7 + 3) * 0.18, h: 0.08 + hp(k * 7 + 4) * 0.07 + patch * 0.05, r: hp(k * 7 + 5) * 6.28 });
+      }
+    }
+    // 해변: 파도에 밀려온 표류목·조개, 물가 바위 (맨 모래뿐이면 사람이 안 사는 세트장처럼 보였다)
+    for (const p of cellsOf(plots)) {
+      const cc = cellCenter(p), hp = (k) => hash(p.id, k + 900, seed);
+      for (let k = 0; k < 40; k++) {
+        const x = cc.x + (hp(k * 5) - 0.5) * S, z = cc.z + (hp(k * 5 + 1) - 0.5) * S, h = heightAt(x, z);
+        if (h < 0.1 || h > 0.5 || nearRiver(x, z) || inBasin(x, z)) continue;
+        const roll = hp(k * 5 + 2), r = hp(k * 5 + 3) * 6.28, sz = hp(k * 5 + 4);
+        if (roll < 0.035) L.drift.push({ x, z, y: h, r, s: 0.5 + sz * 0.9 });
+        else if (roll < 0.075) L.rock.push({ x, z, y: h - 0.05, s: 0.25 + sz * sz * 0.9, r });
+        else if (roll < 0.3 && h < 0.3) L.shell.push({ x, z, y: h, r, s: 0.03 + sz * 0.03 });
+      }
+    }
+    // 화산 비탈: 드러난 바위 덩어리 (높을수록·가파를수록 많이)
+    for (const p of cellsOf(plots)) {
+      const cc = cellCenter(p), hp = (k) => hash(p.id, k + 1300, seed);
+      for (let k = 0; k < 30; k++) {
+        const x = cc.x + (hp(k * 4) - 0.5) * S, z = cc.z + (hp(k * 4 + 1) - 0.5) * S, h = heightAt(x, z);
+        if (h < 5 || inCrater(x, z, h) || inGorge(x, z, 0.6) || onShelf(x, z) || inBasin(x, z)) continue;
+        const sl = Math.hypot(heightAt(x + 0.4, z) - heightAt(x - 0.4, z), heightAt(x, z + 0.4) - heightAt(x, z - 0.4)) / 0.8;
+        if (hp(k * 4 + 2) > 0.05 + ss(0.4, 1.1, sl) * 0.12 + ss(8, 16, h) * 0.08) continue;
+        const sz = hp(k * 4 + 3);
+        L.rock.push({ x, z, y: h - 0.1, s: 0.5 + sz * sz * 2.2, r: hp(k * 4 + 2) * 40 });
       }
     }
     const rl = RL();
@@ -2177,8 +2363,10 @@
     rl.palmVariants.forEach((pv, vi) => {
       const items = L.palm.filter((it) => it.v === vi);
       const place = (it) => { e.set(0, Math.atan2(-Math.cos(it.r), Math.sin(it.r)), 0); q.setFromEuler(e); v.set(it.x, it.y - 0.05, it.z); sc.setScalar(it.h); };
-      inst(pv.trunk, rl.mats.bark, items, place, true);
+      inst(pv.trunk, rl.mats.palmBark || rl.mats.bark, items, place, true);
       inst(pv.leaves, rl.mats.frond, items, place, true, greenTint);
+      if (pv.dead) inst(pv.dead, rl.mats.deadFrond, items, place, false);
+      if (pv.nuts) inst(pv.nuts, rl.mats.nut, items, place, false);
     });
     // 넓은 잎 열대 나무
     rl.broadVariants.forEach((bv, vi) => {
@@ -2196,6 +2384,21 @@
     });
     inst(rl.monsteraGeo, rl.mats.monstera, L.monstera, (it) => { e.set(0, it.r, 0); q.setFromEuler(e); v.set(it.x, it.y - 0.05, it.z); sc.setScalar(it.h); }, true, greenTint);
     // 바위 (실사 바위 텍스처, 납작하게)
+    // 표류목: 바랜 회색 통나무 (한쪽이 갈라진 굵은 가지) / 조개: 작은 연분홍·흰 조각
+    if (L.drift.length) {
+      if (!rl.driftGeo) {
+        const a = new T.CylinderGeometry(0.035, 0.055, 1, 7, 4); a.rotateZ(Math.PI / 2);
+        const pa = a.attributes.position; for (let i = 0; i < pa.count; i++) pa.setY(i, pa.getY(i) + Math.sin(pa.getX(i) * 2.5) * 0.03);
+        const b = new T.CylinderGeometry(0.015, 0.03, 0.4, 5); b.rotateZ(Math.PI / 2 - 0.7); b.translate(0.32, 0.1, 0.05);
+        rl.driftGeo = I.real.merge([a.toNonIndexed(), b.toNonIndexed()]); rl.driftGeo.computeVertexNormals();
+        rl.driftMat = new T.MeshStandardMaterial({ map: rl.tex.bark.diff, normalMap: rl.tex.bark.nor, color: '#b8b0a2', roughness: 0.95 });
+      }
+      inst(rl.driftGeo, rl.driftMat, L.drift, (it) => { e.set(0, it.r, (it.r % 0.3) - 0.15); q.setFromEuler(e); v.set(it.x, it.y + 0.02, it.z); sc.setScalar(it.s); }, true);
+    }
+    if (L.shell.length) {
+      if (!rl.shellGeo) { rl.shellGeo = new T.SphereGeometry(1, 6, 4, 0, Math.PI * 2, 0, Math.PI / 2); rl.shellGeo.scale(1, 0.45, 0.8); rl.shellMat = new T.MeshStandardMaterial({ color: '#f1ddd2', roughness: 0.5 }); }
+      inst(rl.shellGeo, rl.shellMat, L.shell, (it) => { e.set(0, it.r, 0); q.setFromEuler(e); v.set(it.x, it.y - 0.005, it.z); sc.setScalar(it.s); }, false, (it, i) => col.setHSL(0.03 + hash(i, 7, seed) * 0.08, 0.3 + hash(i, 8, seed) * 0.3, 0.75 + hash(i, 9, seed) * 0.15));
+    }
     inst(rl.rockGeo, rl.mats.rock, L.rock, (it) => { e.set(it.r * 0.3, it.r, it.r * 0.2); q.setFromEuler(e); v.set(it.x, it.y - it.s * 0.18, it.z); sc.set(it.s, it.s * 0.55, it.s * 0.85); }, true);
     // 고사리·풀: 변형 몇 가지를 섞고, 가까운 것만 그린다 (updateFernLod)
     lodSets = [];
@@ -2471,6 +2674,7 @@
     const slopeAt = (lx, lz) => Math.abs(gAt(lx + 0.3, lz).ground - gAt(lx - 0.3, lz).ground) + Math.abs(gAt(lx, lz + 0.3).ground - gAt(lx, lz - 0.3).ground);
     // 깃발: 가운데에서 가까운 마른 평지 (웅덩이·개울 한가운데에 꽂히지 않게)
     let fx = 0, fz = 0;
+    const FR = (LOT / 2 - 0.45) / SC; // 구획 안쪽 범위 (그룹 좌표)
     {
       // 벌점: 물속이면 null. 절벽 끝·물가 바로 옆·폭포 턱 근처는 벌점 (0이면 안심 자리)
       const lipAt = field.fall ? [field.fall.x, field.fall.z] : null;
@@ -2484,14 +2688,14 @@
       };
       const cand = [];
       for (let k = 0; k < 33; k++) {
-        const r = k === 0 ? 0 : 0.55 + Math.floor((k - 1) / 8) * 0.65, a = (((k - 1) % 8) / 8) * 6.283 + 0.3 + r;
+        const r = k === 0 ? 0 : (0.55 + Math.floor((k - 1) / 8) * 0.65) / LS, a = (((k - 1) % 8) / 8) * 6.283 + 0.3 + r;
         const lx = Math.cos(a) * r, lz = Math.sin(a) * r;
         if (judge(lx, lz) === 0) cand.push([lx, lz, r * 0.35]);
       }
       // 가운데가 통째로 물·절벽(폭포 웅덩이 칸 등)이면 땅 전체를 훑어 벌점이 가장 적은 자리
       if (!cand.length)
-        for (let lz = -3.2; lz <= 3.21; lz += 0.4)
-          for (let lx = -3.2; lx <= 3.21; lx += 0.4) { const pen = judge(lx, lz); if (pen !== null) cand.push([lx, lz, Math.hypot(lx, lz) * 0.1 + pen]); }
+        for (let lz = -FR; lz <= FR + 0.01; lz += 0.25)
+          for (let lx = -FR; lx <= FR + 0.01; lx += 0.25) { const pen = judge(lx, lz); if (pen !== null) cand.push([lx, lz, Math.hypot(lx, lz) * 0.1 + pen]); }
       cand.sort((a, b) => a[2] - b[2]);
       let best = Infinity;
       for (const [lx, lz, key] of cand.slice(0, 10)) {
@@ -2526,9 +2730,9 @@
       const best = { score: Infinity, range: Infinity, x: fx - 1.4, z: fz + 1.0 };
       const clearOf = (ax, az) => { const wx = cc.x + ax * SC, wz = cc.z + az * SC; return trunks.every((t) => (wx - t.x) ** 2 + (wz - t.z) ** 2 > (t.r + rh) ** 2); };
       const tryAt = (ax, az) => {
-        if (Math.abs(ax) > 3.0 || Math.abs(az) > 3.0) return;
+        if (Math.abs(ax) > FR || Math.abs(az) > FR) return;
         const df = Math.hypot(ax - fx, az - fz);
-        if (df < 1.15) return; // 깃대와 겹치지 않게
+        if (df < 0.95) return; // 깃대와 겹치지 않게
         const ws = foot.map(([u, v]) => gAt(ax + u, az + v));
         if (wet) {
           if (ws.some((w) => w.depth > 1.1 || (w.depth <= 0.03 && w.ground < 0.12))) return;
@@ -2538,11 +2742,11 @@
         const inWater = ws.filter((w) => w.depth > 0.03).length;
         // 물 위: 얕은 물가일수록, 폭포 정면(첫 화면 카메라와 폭포 사이)에서 옆으로 비켜날수록 좋다
         const side = wet && field.fall ? Math.abs((cc.x + ax * SC - field.fall.cx) * -field.fall.fz + (cc.z + az * SC - field.fall.cz) * field.fall.fx) : 9;
-        const score = range + (clear ? 0 : 6) + Math.abs(df - 1.8) * 0.06 + (wet ? ws.reduce((a, w) => a + Math.max(0, w.depth), 0) * 0.15 + Math.max(0, 5 - side) * 0.35 : 0);
+        const score = range + (clear ? 0 : 6) + Math.abs(df - 1.25) * 0.06 + (wet ? ws.reduce((a, w) => a + Math.max(0, w.depth), 0) * 0.15 + Math.max(0, 5 - side) * 0.35 : 0);
         if (score < best.score) Object.assign(best, { score, range: range + (clear ? 0 : 9), x: ax, z: az, wet: wet && inWater > 0 });
       };
-      for (let k = 0; k < 24; k++) { const a = (k / 12) * 6.283 + 0.4, r = k < 12 ? 1.35 : 2.3; tryAt(fx + Math.cos(a) * r, fz + Math.sin(a) * r); }
-      for (let az = -2.8; az <= 2.81; az += 0.5) for (let ax = -2.8; ax <= 2.81; ax += 0.5) tryAt(ax, az);
+      for (let k = 0; k < 24; k++) { const a = (k / 12) * 6.283 + 0.4, r = k < 12 ? 1.05 : 1.4; tryAt(fx + Math.cos(a) * r, fz + Math.sin(a) * r); }
+      for (let az = -FR; az <= FR + 0.01; az += 0.3) for (let ax = -FR; ax <= FR + 0.01; ax += 0.3) tryAt(ax, az);
       return best;
     };
     // 오두막은 기둥(고상식)이라 산비탈에서도 2.3m까지 세운다. 그래도 자리가 없으면(폭포 웅덩이 칸 등) 작은 오두막.
@@ -2599,6 +2803,18 @@
       grp.add(tw);
       trunks.push({ x: cc.x + tx * 1.4, z: cc.z + tz * 1.4, r: 0.7, flag: p.id });
     }
+    // 세입자 천막: 주인 집 둘레 빈 평지에 (많아도 4동까지만 그린다 — 인원이 많으면 문명 단계 건물이 맡는다)
+    const nt = rl ? Math.min(4, p.tenants || 0) : 0;
+    for (let k = 0; k < nt; k++) {
+      const ts = findSpot(FOOT_SMALL, 0.75);
+      if (!(ts.range < 0.45)) break;
+      const tt = canvasTent('#d9cfb8', rl), tw0 = FOOT_SMALL.map(([u, v]) => gAt(ts.x + u, ts.z + v).ground);
+      tt.position.set(ts.x, ((tw0[0] * 2 + Math.min(...tw0)) / 3 - base) / SC, ts.z);
+      tt.rotation.y = p.id * 2.3 + k * 1.9;
+      tt.scale.setScalar(0.85);
+      grp.add(tt);
+      trunks.push({ x: cc.x + ts.x * SC, z: cc.z + ts.z * SC, r: 0.7, flag: p.id, top: Math.max(...tw0) + 0.85 });
+    }
     trunks.push({ x: cc.x + fx * SC + 0.06, z: cc.z + fz * SC, r: 0.08, flag: p.id });
     grp.userData.scale = 1.4;
     grp.userData.spot = { x: cc.x + fx * SC, z: cc.z + fz * SC, hx: cc.x + hx * SC, hz: cc.z + hz * SC, house: tentOK };
@@ -2608,7 +2824,7 @@
 
   // 목책 울타리: 땅 둘레를 따라 말뚝과 가로대 (깃발 그룹 좌표, 1.4배 스케일 보정)
   function fence(cc, rl) {
-    const g = new T.Group(), half = (S / 2 - 0.25) / 1.4, k = 1 / 1.4, geos = [];
+    const g = new T.Group(), half = (LOT / 2 - 0.2) / 1.4, k = 1 / 1.4, geos = [];
     const base = heightAt(cc.x, cc.z);
     const post = (x, z) => {
       const y = (heightAt(cc.x + x * 1.4, cc.z + z * 1.4) - base) * k;
@@ -2665,8 +2881,8 @@
     for (const p of plots) {
       if (p.owner || p.signal < 3) continue;
       const cc = cellCenter(p);
-      for (let k = 0; k < (p.signal - 2) * 2; k++) {
-        const x = cc.x + (hash(p.id, k + 50, seed) - 0.5) * S * 0.7, z = cc.z + (hash(p.id, k + 60, seed) - 0.5) * S * 0.7;
+      for (let k = 0; k < p.signal - 2; k++) {
+        const x = cc.x + (hash(p.id, k + 50, seed) - 0.5) * LOT * 0.7, z = cc.z + (hash(p.id, k + 60, seed) - 0.5) * LOT * 0.7;
         pts.push(x, heightAt(x, z) + 0.5 + hash(p.id, k + 70, seed) * 0.9, z);
         phase.push(hash(p.id, k + 80, seed) * 6.28);
       }
@@ -2689,7 +2905,7 @@
         void main(){ float y = vDir.y;
           vec3 c = mix(uHor, uMid, smoothstep(0.0, 0.22, y));
           c = mix(c, uTop, smoothstep(0.22, 0.85, y));
-          if (y < 0.0) c = uHor * 0.85;
+          if (y < 0.0) c = uHor; // 바다 끝(안개색)과 같아야 수평선 아래 띠가 안 보인다
           float s = max(dot(normalize(vDir), normalize(uSunDir)), 0.0);
           c += uSun * (pow(s, 6.0) * 0.35 + pow(s, 90.0) * 0.7 + pow(s, 900.0) * 2.0);
           gl_FragColor = vec4(c, 1.0);
@@ -2769,6 +2985,7 @@
           float d = length(vW.xz);
           // 바이러스에 오염된 바깥 바다: 탁한 보랏빛
           float poll = smoothstep(uPollR - 25.0, uPollR + 15.0, d) * (1.0 - smoothstep(330.0, 650.0, d));
+          poll *= 1.0 - smoothstep(60.0, 160.0, cdist); // 가까이서만: 멀리선 수평선이 맑게 이어지게
           col = mix(col, vec3(0.18, 0.18, 0.23) + vec3(0.04, 0.06, 0.02) * sin(vW.x * 0.05 + uTime * 0.3), poll * 0.7);
           float far = smoothstep(260.0, 1000.0, d);
           col = mix(col, uHor, far);
@@ -2801,7 +3018,7 @@
   }
 
   function beam(color, alpha) {
-    const r = (S / 2) * Math.SQRT2;
+    const r = (LOT / 2) * Math.SQRT2;
     const geo = new T.CylinderGeometry(r, r, 7, 4, 1, true).rotateY(Math.PI / 4).translate(0, 3.5, 0);
     const mat = new T.ShaderMaterial({
       transparent: true, depthWrite: false, side: T.DoubleSide, blending: T.AdditiveBlending,
@@ -2890,7 +3107,98 @@
     // 땅 동물 모델은 아직 없다. 대신 물고기 떼·나비·반딧불이로 섬에 생기를 준다
     const grp = new T.Group();
     lifeFx = buildLife(grp);
+    try { wildFx = buildWild(grp); } catch (e) { console.warn('[island] 야생동물', e); wildFx = null; }
     return { grp, list: [] };
+  }
+
+  // ---------- 야생동물: 돌고래·바다거북·게·앵무새 떼 (코드로 만든 실사풍 형태, 1m ≈ 0.26) ----------
+  let wildFx = null;
+  function wildMesh(geos, mat) { const m = new T.Mesh(I.real.merge(geos.map((g) => (g.index ? g.toNonIndexed() : g))), mat); m.castShadow = true; return m; }
+  function shadeY(g, lo, hi, cLo, cHi) { // 배는 밝고 등은 어둡게 (정점색)
+    const p = g.attributes.position, c = new Float32Array(p.count * 3), a = new T.Color(cLo), b = new T.Color(cHi), t = new T.Color();
+    for (let i = 0; i < p.count; i++) { t.copy(a).lerp(b, ss(lo, hi, p.getY(i))); c[i * 3] = t.r; c[i * 3 + 1] = t.g; c[i * 3 + 2] = t.b; }
+    g.setAttribute('color', new T.BufferAttribute(c, 3));
+    return g;
+  }
+  function findSpots(n, test, rnd, tries) {
+    const out = [];
+    for (let i = 0; i < (tries || 4000) && out.length < n; i++) { const x = (rnd() - 0.5) * 360, z = (rnd() - 0.5) * 360; if (Math.hypot(x, z) < POLLUTION_R - 20 && test(x, z, heightAt(x, z))) out.push({ x, z }); }
+    return out;
+  }
+  // 가까이서 보면 장난감 같아서(v159 확인), 멀리서 읽히는 실루엣만 둔다: 먼바다 돌고래 · 하늘의 새 떼
+  function buildWild(grp) {
+    const rnd = I.rng.make(seed + 4242), fx = { dolphins: [], flocks: [] };
+    const vc = (o) => new T.MeshStandardMaterial(Object.assign({ vertexColors: true, roughness: 0.5 }, o));
+    // 돌고래 (2.5m): 앞 1/3이 가장 굵고 꼬리자루로 가늘어지는 방추형 + 등지느러미 + 꼬리
+    const dBody = (() => {
+      const g = new T.SphereGeometry(1, 18, 10).scale(0.085, 0.09, 0.32), p = g.attributes.position;
+      for (let i = 0; i < p.count; i++) { const z = p.getZ(i), k = z >= 0.05 ? 1 : 0.18 + 0.82 * ss(-0.32, 0.05, z); p.setX(i, p.getX(i) * k); p.setY(i, p.getY(i) * k); }
+      g.computeVertexNormals();
+      return shadeY(g, -0.06, 0.05, '#8e98a2', '#3a4652');
+    })();
+    const dSnout = shadeY(new T.SphereGeometry(1, 8, 6).scale(0.022, 0.02, 0.06).translate(0, -0.012, 0.33), -0.03, 0.01, '#8e98a2', '#3a4652');
+    const fin = (h, l) => { const g = new T.BufferGeometry(); g.setAttribute('position', new T.Float32BufferAttribute([0, 0, l * 0.5, 0, h, -l * 0.35, 0, 0, -l * 0.5], 3)); g.computeVertexNormals(); return shadeY(g, 0, 1, '#3a4652', '#3a4652'); };
+    const dDorsal = fin(0.1, 0.12).translate(0, 0.075, -0.02);
+    const dFluke = (() => { const g = new T.BufferGeometry(); g.setAttribute('position', new T.Float32BufferAttribute([0, 0, -0.27, -0.12, 0, -0.39, 0, 0, -0.34, 0, 0, -0.27, 0, 0, -0.34, 0.12, 0, -0.39], 3)); g.computeVertexNormals(); return shadeY(g, 0, 1, '#3a4652', '#3a4652'); })();
+    const dMat = vc({ side: T.DoubleSide, roughness: 0.3, metalness: 0.05 });
+    const deep = findSpots(3, (x, z, h) => h < -1.6 && Math.hypot(x, z) > 95, rnd);
+    deep.forEach((s) => {
+      const m = wildMesh([dBody.clone(), dSnout.clone(), dDorsal.clone(), dFluke.clone()], dMat);
+      grp.add(m);
+      fx.dolphins.push({ m, cx: s.x, cz: s.z, R: 7 + rnd() * 6, a: rnd() * 6.28, dir: rnd() < 0.5 ? 1 : -1, sp: 0.22 + rnd() * 0.06, jumpT: -1, next: 3 + rnd() * 8, ph: rnd() * 6 });
+    });
+    // 새 떼: 역광 실루엣 (어두운 몸 + 퍼덕이는 날개). 높이 날아 작게만 보인다
+    const silMat = new T.MeshBasicMaterial({ color: '#2b2f36', side: T.DoubleSide, fog: true });
+    const bodyGeo = new T.SphereGeometry(1, 6, 4).scale(0.012, 0.012, 0.045);
+    const wingGeo = (sd) => { const g = new T.BufferGeometry(); g.setAttribute('position', new T.Float32BufferAttribute([0, 0, 0.02, sd * 0.1, 0, -0.01, 0, 0, -0.025], 3)); return g; };
+    const bird = () => {
+      const b = new T.Group();
+      b.add(new T.Mesh(bodyGeo, silMat));
+      const w = [1, -1].map((sd) => { const m = new T.Mesh(wingGeo(sd), silMat); b.add(m); return m; });
+      b.userData.w = w;
+      return b;
+    };
+    for (let f = 0; f < 2; f++) {
+      const birds = [];
+      for (let k = 0; k < 7; k++) { const b = bird(); grp.add(b); birds.push({ b, ox: (rnd() - 0.5) * 3, oy: (rnd() - 0.5) * 1.2, oz: (rnd() - 0.5) * 3, ph: rnd() * 6 }); }
+      fx.flocks.push({ birds, R: 35 + f * 25, a: rnd() * 6.28, sp: 0.06 + f * 0.02, cx: field && field.vc ? field.vc[0] : 0, cz: field && field.vc ? field.vc[1] : 0 });
+    }
+    return fx;
+  }
+  function updateWild(dt, t) {
+    const f = wildFx;
+    if (!f) return;
+    const night = curPal ? curPal.stars : 0;
+    // 돌고래: 큰 원을 돌며 헤엄치다 가끔 수면 위로 뛰어오른다 (들어갈 때 첨벙). 카메라가 25 안으로 오면 숨는다
+    for (const d of f.dolphins) {
+      d.a += d.dir * d.sp * dt;
+      const x = d.cx + Math.cos(d.a) * d.R, z = d.cz + Math.sin(d.a) * d.R, hx = -Math.sin(d.a) * d.dir, hz = Math.cos(d.a) * d.dir;
+      let y = -0.18 + Math.sin(t * 1.3 + d.ph) * 0.05, pitch = Math.cos(t * 1.3 + d.ph) * 0.15;
+      const far = Math.hypot(camera.position.x - x, camera.position.z - z) > 25;
+      d.next -= dt;
+      if (d.jumpT < 0 && d.next <= 0) { d.jumpT = 0; if (far) splashAt(x, 0, z, 0.6); }
+      if (d.jumpT >= 0) {
+        d.jumpT += dt / 1.3;
+        const k = d.jumpT; y = -0.15 + Math.sin(Math.PI * k) * 0.75; pitch = Math.cos(Math.PI * k) * 0.9;
+        if (k >= 1) { d.jumpT = -1; d.next = 5 + Math.random() * 10; if (far) splashAt(x + hx * 0.3, 0, z + hz * 0.3, 0.9); }
+      }
+      d.m.visible = far;
+      d.m.position.set(x, y, z);
+      d.m.rotation.set(-pitch, Math.atan2(hx, hz), 0, 'YXZ');
+    }
+    // 새 떼: 밤엔 숨는다
+    for (const fl of f.flocks) {
+      fl.a += fl.sp * dt;
+      const cx = fl.cx + Math.cos(fl.a) * fl.R, cz = fl.cz + Math.sin(fl.a) * fl.R * 0.8, hx = -Math.sin(fl.a), hz = Math.cos(fl.a) * 0.8;
+      const gy = Math.max(heightAt(cx, cz), 0) + 9 + Math.sin(fl.a * 3) * 2;
+      for (const b of fl.birds) {
+        b.b.visible = night < 0.5;
+        b.b.position.set(cx + b.ox + Math.sin(t * 0.8 + b.ph) * 0.6, gy + b.oy + Math.sin(t * 1.1 + b.ph) * 0.3, cz + b.oz + Math.cos(t * 0.7 + b.ph) * 0.6);
+        b.b.rotation.set(0, Math.atan2(hx, hz), Math.sin(t + b.ph) * 0.2);
+        const fl2 = Math.sin(t * 9 + b.ph) * 0.7;
+        b.b.userData.w[0].rotation.z = fl2; b.b.userData.w[1].rotation.z = -fl2;
+      }
+    }
   }
 
   // ---------- 생기: 라군 물고기 떼 · 낮의 나비 · 밤의 반딧불이 ----------
@@ -3065,7 +3373,7 @@
   // 현재 구역 경계선 (지형을 따라 그린다)
   function setOutline(p, color) {
     if (!p) { outline.visible = false; return; }
-    const cc = cellCenter(p), h = S / 2, pts = [];
+    const cc = cellCenter(p), h = LOT / 2, pts = [];
     const corners = [[-h, -h], [h, -h], [h, h], [-h, h], [-h, -h]];
     // 바닥을 따라 짧은 선분으로 그리고, 절벽처럼 높이가 크게 튀는 곳은 끊는다 (공중에 걸린 철사처럼 보이지 않게)
     const ring = [];
@@ -3146,7 +3454,7 @@
     return w !== null ? w + EYE : Math.max(heightAt(x, z) + EYE, 0.14);
   }
 
-  let camBack = 1.55, camHeadY = null;
+  let camBack = 1.55, camHeadY = null, shakeT = 0;
   function walkPose(dt) {
     if (!hero) {
       const q = new T.Quaternion().setFromEuler(new T.Euler(player.pitch, player.yaw, 0, 'YXZ'));
@@ -3154,11 +3462,14 @@
     }
     // 어깨 너머 카메라: 캐릭터 머리 뒤쪽 위에서 바라본다
     const headT = (player.by !== undefined ? player.by : feetY(player.x, player.z)) + BODY_H * 0.85 + player.jy;
-    camHeadY = camHeadY === null || !(Math.abs(camHeadY - headT) < 6) ? headT : camHeadY + (headT - camHeadY) * Math.min(1, (dt || 0.016) * 9);
+    camHeadY = camHeadY === null || player.drop || !(Math.abs(camHeadY - headT) < 6) ? headT : camHeadY + (headT - camHeadY) * Math.min(1, (dt || 0.016) * 9);
     const head = new T.Vector3(player.x, camHeadY, player.z);
-    const cp = Math.cos(player.pitch), f = new T.Vector3(-Math.sin(player.yaw) * cp, Math.sin(player.pitch), -Math.cos(player.yaw) * cp);
+    // 낙하 중엔 뒤로 물러나 내려다본다 (떨어질 자리가 보이게). 질주할 땐 조금 더 뒤로
+    const dk = player.drop ? ss(0.6, 4.5, player.jy) : 0;
+    const pitch = player.pitch - 0.85 * dk, BACK = 1.55 + 1.1 * dk + (player.sprint && player.moving ? 0.15 : 0);
+    const cp = Math.cos(pitch), f = new T.Vector3(-Math.sin(player.yaw) * cp, Math.sin(pitch), -Math.cos(player.yaw) * cp);
     // 카메라와 캐릭터 사이에 줄기가 있으면 카메라를 앞으로 당긴다 (줄기 속으로 파고들지 않게)
-    let back = 1.55;
+    let back = BACK;
     const nearT = trunks.filter((t) => Math.abs(t.x - head.x) < 6 && Math.abs(t.z - head.z) < 6);
     const hitCam = (px, py, pz) => nearT.some((t) => {
       const d2 = (px - t.x) ** 2 + (pz - t.z) ** 2;
@@ -3167,8 +3478,8 @@
       const rc = t.h * 0.3, cy = t.y + t.h * 0.78; // 수관
       return d2 < rc * rc && Math.abs(py - cy) < rc * 0.7;
     });
-    for (let d = 0.12; d <= 1.55; d += 0.08) {
-      const px = head.x - f.x * d, pz = head.z - f.z * d, py = head.y - f.y * d + 0.18 * (d / 1.55);
+    for (let d = 0.12; d <= BACK; d += 0.08) {
+      const px = head.x - f.x * d, pz = head.z - f.z * d, py = head.y - f.y * d + 0.18 * (d / BACK);
       if (py < waterState(px, pz).ground + 0.1 || hitCam(px, py, pz)) { back = Math.max(0.22, d - 0.12); break; }
     }
     // 벽에 막히면 즉시 당기고(벽 속을 보지 않게), 풀릴 땐 천천히 물러난다
@@ -3216,6 +3527,9 @@
       const want = mode === 'game' && !trans ? 1 : 0, op = territory.material.opacity + (want - territory.material.opacity) * Math.min(1, dt * 4);
       territory.material.opacity = op;
       territory.visible = op > 0.01;
+      // 밤엔 영토판을 어둡게: 하얀 판이 조명과 무관하게 그려져 밤 섬 전체가 회백색으로 떠 보였다 (지형 자체는 검푸른데 그 위 덮개만 밝았음)
+      const nightK = 1 - (curPal ? curPal.stars : 0) * 0.82;
+      territory.material.color.setRGB(nightK, nightK, nightK + 0.03 * (1 - nightK));
     }
     if (trans) {
       trans.k = Math.min(1, (performance.now() - trans.t0) / (trans.dur * 1000));
@@ -3228,6 +3542,17 @@
     if (mode === 'walk') updateWalk(dt);
     let target = mode === 'walk' ? walkPose(dt) : mode === 'hero' ? heroPose() : overviewPose(cam, theta + userTheta);
     if (dbgCam) target = dbgCam;
+    if (mode === 'walk' && hero) {
+      // 질주·낙하 때 화각을 넓혀 속도감을 낸다
+      const want = 58 + (player.sprint && player.moving ? 7 : 0) + (player.drop ? 10 : 0);
+      if (Math.abs(camera.fov - want) > 0.02) { camera.fov += (want - camera.fov) * Math.min(1, dt * 5); camera.updateProjectionMatrix(); }
+      // 착지 충격: 잠깐 흔들린다
+      if (shakeT > 0) {
+        shakeT -= dt;
+        const a = Math.max(0, shakeT) * 0.12;
+        target = { pos: target.pos.clone().add(new T.Vector3((Math.random() - 0.5) * a, (Math.random() - 0.5) * a, (Math.random() - 0.5) * a)), quat: target.quat };
+      }
+    }
     if (tween) {
       const k = Math.min(1, (performance.now() - tween.t0) / (tween.dur * 1000)), e = ease(k);
       camera.position.lerpVectors(tween.pos, target.pos, e);
@@ -3334,7 +3659,16 @@
     return { ground, level, depth: level === null ? 0 : level - ground };
   }
   // 수영 동작은 기준점이 가슴 높이다 (서 있는 동작은 발). 떠 있을 땐 어깨까지 잠기게
-  const bodyY = (ws) => (ws.depth > SWIM ? ws.level - 0.02 : ws.ground);
+  function footprintY(x, z, ws) {
+    const fx = Math.sin(player.face), fz = Math.cos(player.face);
+    let g = ws.ground;
+    for (const [a, b] of [[0.075, 0], [-0.075, 0], [0, 0.045], [0, -0.045]]) {
+      const q = waterState(x + fx * a - fz * b, z + fz * a + fx * b).ground;
+      if (q > g) g = q;
+    }
+    return Math.min(g, ws.ground + 0.08);
+  }
+  const bodyY = (ws, x, z) => (ws.depth > SWIM ? ws.level - 0.02 : x === undefined ? ws.ground : footprintY(x, z, ws));
 
   // ---- 잔물결·첨벙 ----
   const ripples = [];
@@ -3441,15 +3775,23 @@
       mx = (keys.KeyD || keys.ArrowRight ? 1 : 0) - (keys.KeyA || keys.ArrowLeft ? 1 : 0) + joy.x;
       mz = (keys.KeyW || keys.ArrowUp ? 1 : 0) - (keys.KeyS || keys.ArrowDown ? 1 : 0) - joy.y;
     }
+    // 낙하 착지 구르기: 구르는 동안은 보던 쪽으로 저절로 나아간다
+    if (player.roll > 0) { mx = 0; mz = 1; }
     const len = Math.hypot(mx, mz);
     if (len > 1) { mx /= len; mz /= len; }
     const ws0 = waterState(player.x, player.z);
     const wading = ws0.depth > 0.06, swimming = ws0.depth > SWIM;
-    player.walk = !!(keys.ShiftLeft || keys.ShiftRight) || ws0.depth > 0.2;
-    if (player.by === undefined || !isFinite(player.by)) player.by = bodyY(ws0);
+    // 기본은 가볍게 뛰기, Shift(모바일은 멀리 끌기)는 전력 질주. 물이 깊거나 모바일에서 살짝 끌면 걷기
+    const dash = !!(keys.ShiftLeft || keys.ShiftRight) || joy.far;
+    player.walk = ws0.depth > 0.2 || (len > 0.05 && len < 0.5 && !dash && player.roll <= 0);
+    player.sprint = dash && !player.walk && !swimming && !player.drop && player.roll <= 0;
+    if (player.by === undefined || !isFinite(player.by)) player.by = bodyY(ws0, player.x, player.z);
     if (len > 0.05) {
-      // 기본은 가볍게 뛰기, Shift(또는 물속)는 걷기
-      const speed = (swimming ? RUN * 0.55 : player.walk ? WALK * (wading ? 1.2 : 1) : RUN) * Math.min(1, len);
+      const speed = player.roll > 0 ? RUN * Math.min(1, (player.roll / ROLL_T) * 1.6)
+        : player.drop ? RUN * 0.7
+        : swimming ? RUN * (dash ? 0.8 : 0.55) * Math.min(1, len)
+        : player.walk ? WALK * (wading ? 1.2 : 1) * Math.min(1, len / 0.3)
+        : (player.sprint ? SPRINT : RUN) * Math.min(1, len);
       const sy = Math.sin(player.yaw), cy = Math.cos(player.yaw);
       const dx = (-sy * mz + cy * mx) * speed * dt, dz = (-cy * mz - sy * mx) * speed * dt;
       // 절벽은 못 오른다 (기울기 약 67도 이상). 점프 중엔 점프 높이까지만
@@ -3507,7 +3849,7 @@
     }
     player.moving = len > 0.05;
     // 몸 높이: 땅을 따라 부드럽게. 턱에서 0.3 넘게 떨어지면 중력으로 떨어진다
-    const ws = waterState(player.x, player.z), deep = ws.depth > SWIM, target = bodyY(ws);
+    const ws = waterState(player.x, player.z), deep = ws.depth > SWIM, target = bodyY(ws, player.x, player.z);
     // 물에 들고 날 땐 몸 기준점이 발 ↔ 가슴으로 바뀐다 → 동작이 바뀌는 0.22초와 같은 속도로 옮겨야 몸이 솟거나 꺼지지 않는다
     if (deep !== !!player.deep) { player.deep = deep; player.byFrom = player.by; player.byT = 0; }
     if (player.air) player.byT = 1; // 공중에선 몸 높이가 바닥을 따라가고 높이는 jy가 맡는다
@@ -3517,25 +3859,52 @@
     // 점프: 위로 튀었다가 중력으로 떨어진다
     if (player.air) {
       player.vy -= GRAVITY * dt;
+      if (player.drop) player.vy = Math.max(player.vy, -DROP_VT); // 낙하는 공기 저항으로 최고 속도까지만
       player.jy += player.vy * dt;
       if (player.jy <= 0) {
         // 물로 떨어지면 첨벙
         if (ws.depth > 0.06) splashAt(player.x, ws.level, player.z, Math.min(1.6, 0.6 + -player.vy * 0.18));
-        player.jy = 0; player.vy = 0; player.air = false; player.land = deep ? 0 : 0.28;
+        player.land = deep ? 0 : 0.28;
+        if (player.drop) {
+          // 낙하 착지: 땅이면 앞으로 구르고, 화면이 쿵 흔들린다
+          shakeT = deep ? 0.2 : 0.4;
+          if (!deep && ws.depth < 0.06) { player.roll = ROLL_T; player.land = 0; } // 구르기 동작은 제자리라 몸은 코드가 앞으로 민다
+          player.drop = false;
+        }
+        player.jy = 0; player.vy = 0; player.air = false;
       }
     } else if (player.land > 0) player.land -= dt;
+    if (player.roll > 0) player.roll -= dt;
     // 물속에서 움직이면 잔물결
     player.rip = (player.rip || 0) - dt;
     if (ws.depth > 0.04 && (player.moving || deep) && player.rip <= 0 && !player.air) { rippleAt(player.x, ws.level, player.z, false); player.rip = player.moving ? 0.22 : 0.7; }
+    // 얕은 물을 뛰어 건너면 발밑에서 물이 튄다 (투명한 물에선 다리가 잠긴 건지 잘린 건지 안 보였다)
+    player.spl = (player.spl || 0) - dt;
+    if (ws.depth > 0.06 && ws.depth <= SWIM && player.moving && !player.walk && player.spl <= 0 && !player.air) { splashAt(player.x, ws.level, player.z, player.sprint ? 0.5 : 0.32); player.spl = 0.28; }
     if (hero) {
-      hero.obj.position.set(player.x, player.by + player.jy, player.z); // 수영: 물에 몸이 잠긴다
-      hero.obj.rotation.y = player.face + HERO_FACE;
+      // 낙하 중 높이 있을 땐 팔다리를 벌리고 엎드린 자세(스카이다이빙), 땅이 가까워지면 일어서서 착지 준비
+      const sky = player.drop && player.jy > 2.4;
+      player.tilt += ((sky ? 1.2 : 0) - player.tilt) * Math.min(1, dt * 7);
+      const HIP = BODY_H * 0.5, fx = Math.sin(player.face + HERO_FACE), fz = Math.cos(player.face + HERO_FACE);
+      // 비탈에선 오르막 쪽으로 살짝 기울인다 (허리 위만 조금, 최대 11도)
+      const gF = waterState(player.x + fx * 0.12, player.z + fz * 0.12).ground, gB = waterState(player.x - fx * 0.12, player.z - fz * 0.12).ground;
+      const leanW = deep || player.air ? 0 : Math.max(-0.2, Math.min(0.2, Math.atan((gF - gB) / 0.24) * 0.3));
+      player.lean = (player.lean || 0) + (leanW - (player.lean || 0)) * Math.min(1, dt * 6);
+      const tl = player.tilt + player.lean;
+      // 발이 아니라 엉덩이를 축으로 기울인다
+      hero.obj.position.set(player.x - fx * HIP * Math.sin(tl), player.by + player.jy + HIP * (1 - Math.cos(tl)), player.z - fz * HIP * Math.sin(tl)); // 수영: 물에 몸이 잠긴다
+      hero.obj.rotation.order = 'YXZ';
+      hero.obj.rotation.set(tl, player.face + HERO_FACE, 0);
+      if (hero.setWater) hero.setWater(ws.level !== null ? ws.level : -99); // 수면 아래 몸은 물빛으로
       playHero(!inputOn && !player.moving ? 'kneel'
+        : sky ? 'float'
+        : player.roll > 0 ? 'roll'
         : player.air ? (player.vy > 1 ? 'jumpStart' : 'jumpLoop')
         : player.land > 0 ? 'jumpLand'
-        : deep ? (player.moving ? 'swim' : 'float') : !player.moving ? 'idle' : player.walk ? 'walk' : 'run');
+        : deep ? (player.moving ? 'swim' : 'float') : !player.moving ? 'idle' : player.walk ? 'walk' : player.sprint ? 'sprint' : 'run');
+      if (hero.actions.swim) hero.actions.swim.timeScale = dash ? 1.4 : 1; // 빠르게 헤엄치기
       hero.mixer.update(dt);
-      floatArms(hero);
+      if (player.tilt < 0.05) floatArms(hero); // 하늘에선 팔을 벌린 채로 둔다
     }
     const p = plotAt(player.x, player.z);
     const id = p ? p.id : null;
@@ -3608,12 +3977,12 @@
           lookX = vx / vl; lookZ = vz / vl;
         } else { const yw = Math.atan2(-dx / l, -dz / l) + (house ? 0 : 0.38); lookX = -Math.sin(yw); lookZ = -Math.cos(yw); }
       } else { lookX = -Math.sin(Math.atan2(x, z)); lookZ = -Math.cos(Math.atan2(x, z)); }
-      const sc = score(x, z, lookX, lookZ, 5);
+      const sc = score(x, z, lookX, lookZ, own ? 2.2 : 5); // 내 땅(구획 한 변 약 5)에선 깃발에서 2m쯤
       if (sc < bestS) { bestS = sc; best = { x, z, yaw: Math.atan2(-lookX, -lookZ) }; }
     };
     if (own) {
       const c0 = cellCenter(p);
-      for (let z = c0.z - S / 2 + 0.4; z <= c0.z + S / 2 - 0.4; z += 0.7) for (let x = c0.x - S / 2 + 0.4; x <= c0.x + S / 2 - 0.4; x += 0.7) consider(x, z);
+      for (let z = c0.z - LOT / 2 + 0.3; z <= c0.z + LOT / 2 - 0.3; z += 0.45) for (let x = c0.x - LOT / 2 + 0.3; x <= c0.x + LOT / 2 - 0.3; x += 0.45) consider(x, z);
     } else {
       for (let k = 0; k < 32; k++) { const a = out0 + (k % 2 ? 1 : -1) * Math.ceil(k / 2) * 0.4; for (const r of [3.4, 4.6, 6]) consider(cc.x + Math.sin(a) * r, cc.z + Math.cos(a) * r); }
     }
@@ -3648,7 +4017,7 @@
   const TERR_N = 8;
   function buildTerritory() {
     if (territory) { scene.remove(territory); territory.geometry.dispose(); }
-    const n1 = TERR_N + 1, pos = [], idx = [], half = S / 2 - 0.25;
+    const n1 = TERR_N + 1, pos = [], idx = [], half = LOT / 2 - 0.15;
     terrWet = [];
     plots.forEach((p) => {
       const cc = cellCenter(p), base = pos.length / 3;
@@ -3855,12 +4224,17 @@
   function clampFocus() { const r = Math.hypot(focusGoal.x, focusGoal.z); if (r > 110) focusGoal.multiplyScalar(110 / r); }
 
   // ---------- 입력 ----------
-  const ray = new T.Raycaster(), ndc = new T.Vector2();
+  const ray = new T.Raycaster(), ndc = new T.Vector2(), seaPlane = new T.Plane(new T.Vector3(0, 1, 0), 0);
+  let pickPt = null; // 마지막으로 누른 자리 (낙하 지점 후보)
   function plotAtEvent(e) {
     const r = renderer.domElement.getBoundingClientRect();
     ndc.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
     ray.setFromCamera(ndc, camera);
     const hit = ray.intersectObject(terrain, false)[0];
+    // 물 위를 누르면 수면 자리 (지형 밖 먼 바다는 해수면과 만나는 곳)
+    let pt = hit ? hit.point : ray.ray.intersectPlane(seaPlane, new T.Vector3());
+    if (pt) { const ws = waterState(pt.x, pt.z); pt = { x: pt.x, z: pt.z, y: Math.max(ws.ground, ws.level !== null ? ws.level : -99, 0) }; }
+    pickPt = pt && canDrop(pt.x, pt.z) ? pt : null;
     return hit ? plotAt(hit.point.x, hit.point.z) : null;
   }
 
@@ -3904,6 +4278,7 @@
           if (t.kind === 'move') {
             joy.x = Math.max(-1, Math.min(1, (e.clientX - t.x0) / 60));
             joy.y = Math.max(-1, Math.min(1, (e.clientY - t.y0) / 60));
+            joy.far = Math.hypot(e.clientX - t.x0, e.clientY - t.y0) > 110; // 멀리 끌면 전력 질주
           } else {
             player.yaw -= (e.clientX - t.x) * 0.005;
             player.pitch = Math.max(hero ? -0.75 : -1.2, Math.min(hero ? 0.55 : 1.2, player.pitch - (e.clientY - t.y) * 0.005));
@@ -3945,7 +4320,7 @@
       if (gt.size < 2) pinch = null;
       if (mode === 'walk') {
         const t = touches.get(e.pointerId);
-        if (t && t.kind === 'move') { joy.x = 0; joy.y = 0; }
+        if (t && t.kind === 'move') { joy.x = 0; joy.y = 0; joy.far = false; }
         touches.delete(e.pointerId);
         return;
       }
@@ -3953,7 +4328,7 @@
       const moved = down.moved;
       down = null;
       el.style.cursor = 'grab';
-      if (!moved && onPick) onPick(plotAtEvent(e));
+      if (!moved && onPick) { const p = plotAtEvent(e); onPick(p, pickPt); }
     };
     el.addEventListener('pointerup', end);
     el.addEventListener('pointercancel', end);
@@ -4017,6 +4392,7 @@
     }
     updateFauna(dt, t);
     updateLife(dt, t);
+    updateWild(dt, t);
     { const nt = curPal ? curPal.stars : 0; for (let i = hutLamps.length - 1; i >= 0; i--) { const l = hutLamps[i]; let o = l.glow; while (o.parent) o = o.parent; if (o !== scene) { hutLamps.splice(i, 1); continue; } l.mat.emissiveIntensity = 0.2 + nt * 2.2; l.glow.material.opacity = nt * (0.75 + Math.sin(t * 2.1) * 0.08); } }
     updateCelebrate(dt);
     updateCrates(t);
@@ -4121,7 +4497,7 @@
   function sync(ps) {
     plots = ps;
     const now = Date.now();
-    const keyOf = (p) => (p.owner ? p.owner + '|' + (p.buildings || []).join(',') + '|' + (I.guard && I.guard.status(p, now) === 'open' ? 'open' : 'ok') : '');
+    const keyOf = (p) => (p.owner ? p.owner + '|' + (p.buildings || []).join(',') + '|' + (I.guard && I.guard.status(p, now) === 'open' ? 'open' : 'ok') + '|' + Math.min(4, p.tenants || 0) : '');
     const sig = ps.map(keyOf).join(',');
     if (sig === ownerSig) return;
     const ownersChanged = ps.map((p) => p.owner || '-').join(',') !== (sync.owners || '');
@@ -4250,7 +4626,7 @@
       tween = { pos: camera.position.clone(), quat: camera.quaternion.clone(), t0: performance.now(), dur: 1.6 };
       if (document.pointerLockElement) document.exitPointerLock();
       for (const k in keys) keys[k] = false;
-      joy.x = joy.y = 0;
+      joy.x = joy.y = 0; joy.far = false;
       outline.visible = false;
       outlineKey = '';
       player.plotId = -1;
@@ -4266,7 +4642,54 @@
     resize();
   }
 
+  // ---------- 낙하: 지도에서 고른 자리로 하늘에서 내려간다 ----------
+  const DROP_LIM = POLLUTION_R - 10;
+  function canDrop(x, z) { return isFinite(x) && isFinite(z) && Math.hypot(x, z) < DROP_LIM; }
+  function dropAt(x, z) {
+    if (!canDrop(x, z)) return false;
+    // 나무 수관·지붕 바로 위면 가까운 빈 자리로 비킨다 (잎을 뚫고 떨어지지 않게)
+    const covered = (px, pz) => trunks.some((t) => {
+      const d2 = (px - t.x) ** 2 + (pz - t.z) ** 2;
+      return t.h ? d2 < (t.h * 0.3 + 0.25) ** 2 : t.top !== undefined && d2 < (t.r + 0.3) ** 2;
+    });
+    if (covered(x, z)) {
+      let best = null;
+      for (let r = 0.4; r <= 6 && !best; r += 0.4)
+        for (let k = 0; k < 16; k++) {
+          const a = (k / 16) * 6.283, qx = x + Math.sin(a) * r, qz = z + Math.cos(a) * r;
+          if (canDrop(qx, qz) && !covered(qx, qz) && !hitTrunk(qx, qz)) { best = { x: qx, z: qz }; break; }
+        }
+      if (best) { x = best.x; z = best.z; }
+    }
+    // 줄기·바위 안으로 떨어지지 않게 밖으로 민다
+    for (let it = 0; it < 4; it++) {
+      const t = hitTrunk(x, z);
+      if (!t) break;
+      const ox = x - t.x, oz = z - t.z, d = Math.hypot(ox, oz) || 1e-3;
+      x = t.x + (ox / d) * (t.r + PR + 0.05); z = t.z + (oz / d) * (t.r + PR + 0.05);
+    }
+    // 지도에서 보던 방향 그대로 내려간다 (화면이 휙 돌지 않게)
+    const fw = new T.Vector3();
+    camera.getWorldDirection(fw);
+    player.x = x; player.z = z;
+    player.yaw = Math.atan2(-fw.x, -fw.z);
+    player.face = player.yaw + Math.PI;
+    player.pitch = -0.12;
+    player.by = undefined; player.jy = DROP_H; player.vy = 0; player.air = true; player.drop = true; player.tilt = 1.2; player.roll = 0; player.land = 0;
+    hoverId = null;
+    setMode('walk');
+    return true;
+  }
+  // 3D 자리 → 화면 좌표 (지도 위 낙하 표시용)
+  const _sp = new T.Vector3();
+  function toScreen(x, y, z) {
+    _sp.set(x, y, z).project(camera);
+    const el = renderer.domElement;
+    return { x: ((_sp.x + 1) / 2) * el.clientWidth, y: ((1 - _sp.y) / 2) * el.clientHeight, on: _sp.z < 1 && Math.abs(_sp.x) < 1.05 && Math.abs(_sp.y) < 1.05 };
+  }
+
   function enterWalk(plot) {
+    player.drop = false; player.tilt = 0; player.roll = 0; player.land = 0;
     const s = spawnFor(plot);
     player.x = s.x;
     player.z = s.z;
@@ -4279,7 +4702,8 @@
   }
 
   I.world = {
-    init, rebuild, sync, setMode, enterWalk,
+    init, rebuild, sync, setMode, enterWalk, dropAt, canDrop, toScreen,
+    resync(ps) { ownerSig = ''; sync.owners = ''; flagKeys.clear(); sync(ps); }, // 매장량·신호까지 바뀌었을 때 (서버 시즌에 맞춤)
     mode: () => mode,
     ready: () => !!field,
     jump,
@@ -4306,13 +4730,15 @@
     setCharacter,
     timeLabel: () => timeLabel(dayPhase()),
     setPhase(v) { phaseOverride = v; },
-    _dbg: () => ({ camera, scene, renderer, cam, player, trunks, heightAt, hero, field, grassDensity, carpet }),
+    getPhase: () => phaseOverride, // 고정된 시간대 (null = 실제 시간)
+    _dbg: () => ({ camera, scene, renderer, cam, player, trunks, heightAt, hero, field, grassDensity, carpet, wildFx }),
     select(id) { selId = id; },
     setInput(on) {
       inputOn = on;
-      if (!on) { for (const k in keys) keys[k] = false; joy.x = joy.y = 0; if (document.pointerLockElement) document.exitPointerLock(); }
+      if (!on) { for (const k in keys) keys[k] = false; joy.x = joy.y = 0; joy.far = false; if (document.pointerLockElement) document.exitPointerLock(); }
     },
     walkPlot: () => (mode === 'walk' ? plotAt(player.x, player.z) : null),
+    wet: () => (mode === 'walk' ? waterState(player.x, player.z) : null),
     onPick(fn) { onPick = fn; },
     onHover(fn) { onHover = fn; },
     onWalkPlot(fn) { onWalkPlot = fn; },

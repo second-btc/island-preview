@@ -2,12 +2,13 @@
 window.Island = window.Island || {};
 
 Island.config = {
-  SAVE_KEY: 'island.v5',
+  SAVE_KEY: 'island.v6', // v6: 600구획 (v5까지는 150필지라 호환 안 됨)
   ISLAND_SEED: 1111,       // 모든 유저가 보는 단 하나의 섬 모양 (바꾸면 섬이 바뀜)
 
   // 섬
   GRID: 16,               // 격자 한 변
-  LAND_PLOTS: 150,        // 육지 구역 수
+  LAND_PLOTS: 150,        // 육지 칸 수 (섬 지형 단위)
+  LOT_SPLIT: 2,           // 칸 하나를 2×2 구획으로 → 소유 단위 600구획
   TOTAL_TOKENS: 1000000,  // 섬 전체 '처음' 매장량 (구역별 랜덤 배분). 회복분까지 친 시즌 총공급 상한은 아래 REGEN_MAX 참고
   PARETO_ALPHA: 1.5,      // 낮을수록 대박 구역이 더 극단적
   MAX_SHARE: 0.12,        // 한 구역 최대 매장 비율 (한 땅이 판을 독식하지 않게)
@@ -55,8 +56,8 @@ Island.config = {
   // 라이벌 (남은 땅이 줄수록 더 빨리 가져감)
   // 실제 시간 기준: 처음엔 약 1.8시간에 1필지, 막판엔 40분에 1필지 → 한 시즌 약 1주
   RIVAL_FIRST_DELAY: 20 * 60,
-  RIVAL_SEC_START: 6500,
-  RIVAL_SEC_END: 2400,
+  RIVAL_SEC_START: 1625,  // 600구획이라 150필지 때(6500·2400)의 1/4 간격 → 시즌 길이는 그대로 약 1주
+  RIVAL_SEC_END: 600,
   RIVAL_SMART: 0.35,      // 신호 강한 구역을 노릴 확률
   RIVALS: [
     { id: 'prince', name: '붉은 늑대단', color: '#e8575a' },

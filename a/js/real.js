@@ -280,12 +280,19 @@
   function merge(geos) {
     const parts = geos.map((g) => (g.index ? g.toNonIndexed() : g));
     const out = new T.BufferGeometry();
-    for (const name of ['position', 'normal', 'uv']) {
-      const total = parts.reduce((s, g) => s + g.attributes[name].array.length, 0);
+    // uv·color는 일부 조각에만 있을 수 있다 (손으로 만든 지느러미 등) → 없는 조각은 uv 0·흰색으로 채운다
+    for (const name of ['position', 'normal', 'uv', 'color']) {
+      if (name === 'uv' || name === 'color') { if (!parts.some((g) => g.attributes[name])) continue; }
+      const size = name === 'uv' ? 2 : 3, fill = name === 'color' ? 1 : 0;
+      const total = parts.reduce((s, g) => s + g.attributes.position.count * size, 0);
       const arr = new Float32Array(total);
       let off = 0;
-      for (const g of parts) { arr.set(g.attributes[name].array, off); off += g.attributes[name].array.length; }
-      out.setAttribute(name, new T.BufferAttribute(arr, name === 'uv' ? 2 : 3));
+      for (const g of parts) {
+        const n = g.attributes.position.count * size, a = g.attributes[name];
+        if (a) arr.set(a.array, off); else arr.fill(fill, off, off + n);
+        off += n;
+      }
+      out.setAttribute(name, new T.BufferAttribute(arr, size));
     }
     return out;
   }
@@ -312,20 +319,26 @@
     return g;
   }
 
-  // 야자수 한 그루 (높이 1 기준). seed로 휘어짐·잎 개수가 달라진다
+  // 야자수 한 그루 (높이 1 기준). 실제 코코넛 야자 비율: 줄기 지름 ≈ 높이의 2.5%, 잎 길이 ≈ 높이의 30%.
+  // (예전엔 줄기 반지름이 높이의 4.2% — 실제로 치면 지름 1m 넘는 전봇대 — 이고 잎은 길고 적어서 투박했다)
   function palmGeometry(seed) {
     const rnd = I.rng.make(seed);
-    const lean = 0.12 + rnd() * 0.22, curve = 0.6 + rnd() * 0.8;
-    const center = (t) => new T.Vector3(lean * Math.pow(t, curve + 1), t, lean * 0.25 * Math.sin(t * 2));
-    // 줄기: 마디가 있는 원통을 직접 쌓는다
-    const N = 24, RS = 9, pos = [], nor = [], uv = [], idx = [];
+    const lean = 0.18 + rnd() * 0.32, curve = 0.5 + rnd() * 1.1, wob = (rnd() - 0.5) * 0.06;
+    // 줄기는 밑동에서 기울었다가 위에서 다시 하늘 쪽으로 휜다 (바닷바람에 자란 모양)
+    const center = (t) => new T.Vector3(lean * (Math.pow(t, curve) * 0.9 + t * 0.1) - lean * 0.22 * Math.pow(t, 3), t, wob * Math.sin(t * 3.1));
+    const N = 30, RS = 10, pos = [], nor = [], uv = [], col = [], idx = [];
     for (let i = 0; i <= N; i++) {
-      const t = i / N, c = center(t), r = 0.042 * (1 - t * 0.38) * (1 + 0.07 * Math.abs(Math.sin(t * 46)));
+      const t = i / N, c = center(t);
+      // 밑동은 부풀고(뿌리 덩어리) 위로 갈수록 가늘다. 마디(잎 떨어진 자국)마다 살짝 굵고 어둡다
+      const ring = Math.pow(Math.abs(Math.sin(t * 70)), 6);
+      const r = 0.0125 * (1 + 0.9 * Math.pow(1 - t, 6)) * (1 - t * 0.25) * (1 + 0.06 * ring);
       for (let j = 0; j <= RS; j++) {
         const a = (j / RS) * Math.PI * 2, nx = Math.cos(a), nz = Math.sin(a);
         pos.push(c.x + nx * r, c.y, c.z + nz * r);
         nor.push(nx, 0, nz);
-        uv.push(j / RS, t * 5);
+        uv.push(j / RS, t * 9);
+        const k = (0.78 + 0.22 * (1 - ring)) * (0.85 + 0.15 * t); // 마디 그늘, 아래는 흙물
+        col.push(k, k * 0.98, k * 0.94);
       }
     }
     for (let i = 0; i < N; i++)
@@ -337,45 +350,71 @@
     trunk.setAttribute('position', new T.Float32BufferAttribute(pos, 3));
     trunk.setAttribute('normal', new T.Float32BufferAttribute(nor, 3));
     trunk.setAttribute('uv', new T.Float32BufferAttribute(uv, 2));
+    trunk.setAttribute('color', new T.Float32BufferAttribute(col, 3));
     trunk.setIndex(idx);
 
-    // 잎: 위로 솟았다가 처지는 띠 모양 판
-    const top = center(1), fronds = [];
-    const n = 15 + Math.floor(rnd() * 5);
-    for (let k = 0; k < n; k++) {
-      const az = (k / n) * Math.PI * 2 + rnd() * 0.4, L = 0.55 + rnd() * 0.22, W = 0.22 + rnd() * 0.06;
-      const up0 = 0.55 + rnd() * 0.5, down = -0.9 - rnd() * 0.6, SEG = 7;
-      const dir = new T.Vector3(Math.cos(az), 0, Math.sin(az)), side = new T.Vector3(-dir.z, 0, dir.x);
-      const fp = [], fn = [], fu = [], fi = [];
-      let p = top.clone();
-      for (let s = 0; s <= SEG; s++) {
-        const t = s / SEG, th = up0 + (down - up0) * t;
-        if (s > 0) p = p.clone().add(dir.clone().multiplyScalar(Math.cos(th) * L / SEG)).add(new T.Vector3(0, Math.sin(th) * L / SEG, 0));
-        const half = (W / 2) * Math.sin(Math.PI * Math.min(1, t * 1.1 + 0.05));
-        const droop = new T.Vector3(0, -half * 0.35, 0); // 잎 가장자리가 살짝 아래로 접힘
-        for (const sd of [-1, 1]) {
-          const q = p.clone().add(side.clone().multiplyScalar(sd * half)).add(droop);
-          fp.push(q.x, q.y, q.z);
-          fn.push(0, 1, 0);
-          fu.push(sd < 0 ? 0 : 1, t);
+    // 잎: 3층 — 위쪽 어린 잎은 하늘로, 가운데는 수평으로 뻗다 처지고, 아래 묵은 잎은 크게 늘어진다
+    const top = center(1), fronds = [], dead = [];
+    const tiers = [[7, 0.26, 1.05, -0.2], [10, 0.32, 0.55, -1.0], [9, 0.34, 0.15, -1.55]];
+    let kk = 0;
+    for (const [n, Lb, up0b, downb] of tiers) {
+      for (let k = 0; k < n; k++, kk++) {
+        const az = (k / n) * Math.PI * 2 + kk * 0.37 + rnd() * 0.3, L = Lb * (0.85 + rnd() * 0.3), W = L * (0.42 + rnd() * 0.1);
+        const up0 = up0b + (rnd() - 0.5) * 0.3, down = downb + (rnd() - 0.5) * 0.4, SEG = 9;
+        const dir = new T.Vector3(Math.cos(az), 0, Math.sin(az)), side = new T.Vector3(-dir.z, 0, dir.x);
+        const twist = (rnd() - 0.5) * 0.6; // 잎이 비틀려 옆면을 보인다
+        const fp = [], fn = [], fu = [], fi = [];
+        let p = top.clone().add(new T.Vector3(0, -0.012, 0));
+        for (let s = 0; s <= SEG; s++) {
+          const t = s / SEG, th = up0 + (down - up0) * t * t;
+          if (s > 0) p = p.clone().add(dir.clone().multiplyScalar(Math.cos(th) * L / SEG)).add(new T.Vector3(0, Math.sin(th) * L / SEG, 0));
+          const half = (W / 2) * Math.sin(Math.PI * Math.min(1, t * 1.05 + 0.04));
+          const tw = twist * t;
+          for (const sd of [-1, 1]) {
+            // 소엽이 잎맥에서 V자로 접혀 올라간다 (평평한 판이면 위에서 보면 종잇장)
+            const q = p.clone().add(side.clone().multiplyScalar(sd * half * Math.cos(tw))).add(new T.Vector3(0, half * (0.28 + sd * Math.sin(tw)), 0));
+            fp.push(q.x, q.y, q.z);
+            fn.push(0, 1, 0);
+            fu.push(sd < 0 ? 0 : 1, t);
+          }
         }
+        for (let s = 0; s < SEG; s++) { const a = s * 2; fi.push(a, a + 2, a + 1, a + 1, a + 2, a + 3); }
+        const g = new T.BufferGeometry();
+        g.setAttribute('position', new T.Float32BufferAttribute(fp, 3));
+        g.setAttribute('normal', new T.Float32BufferAttribute(fn, 3));
+        g.setAttribute('uv', new T.Float32BufferAttribute(fu, 2));
+        g.setIndex(fi);
+        g.computeVertexNormals();
+        fronds.push(g);
       }
-      for (let s = 0; s < SEG; s++) { const a = s * 2; fi.push(a, a + 2, a + 1, a + 1, a + 2, a + 3); }
+    }
+    // 마른 잎 2~3장: 줄기에 바짝 붙어 늘어진 갈색 잎 (따로 모아 갈색 재질로)
+    const nd = 2 + Math.floor(rnd() * 2);
+    for (let k = 0; k < nd; k++) {
+      const az = rnd() * Math.PI * 2, L = 0.24 + rnd() * 0.06, W = 0.06;
+      const dir = new T.Vector3(Math.cos(az), 0, Math.sin(az)), side = new T.Vector3(-dir.z, 0, dir.x);
+      const fp = [], fu = [], fi = [];
+      for (let s = 0; s <= 6; s++) {
+        const t = s / 6, q0 = top.clone().add(dir.clone().multiplyScalar(0.02 + 0.03 * Math.sin(t * 2))).add(new T.Vector3(0, -0.02 - t * L, 0));
+        for (const sd of [-1, 1]) { const q = q0.clone().add(side.clone().multiplyScalar(sd * W * (1 - t * 0.6))); fp.push(q.x, q.y, q.z); fu.push(sd < 0 ? 0 : 1, t); }
+      }
+      for (let s = 0; s < 6; s++) { const a = s * 2; fi.push(a, a + 2, a + 1, a + 1, a + 2, a + 3); }
       const g = new T.BufferGeometry();
       g.setAttribute('position', new T.Float32BufferAttribute(fp, 3));
-      g.setAttribute('normal', new T.Float32BufferAttribute(fn, 3));
       g.setAttribute('uv', new T.Float32BufferAttribute(fu, 2));
       g.setIndex(fi);
       g.computeVertexNormals();
-      fronds.push(g);
+      dead.push(g);
     }
-    // 코코넛
-    for (let k = 0; k < 3; k++) {
-      const c = new T.SphereGeometry(0.028, 7, 5);
-      c.translate(top.x + Math.cos(k * 2.1) * 0.035, top.y - 0.04, top.z + Math.sin(k * 2.1) * 0.035);
-      fronds.push(c);
+    // 코코넛 송이
+    const nuts = [];
+    for (let k = 0; k < 4 + Math.floor(rnd() * 3); k++) {
+      const c = new T.SphereGeometry(0.011, 7, 5);
+      c.scale(1, 1.15, 1);
+      c.translate(top.x + Math.cos(k * 1.7) * 0.016, top.y - 0.022 - (k % 2) * 0.008, top.z + Math.sin(k * 1.7) * 0.016);
+      nuts.push(c);
     }
-    return { trunk, leaves: shadeCanopy(merge(fronds), top.clone().add(new T.Vector3(0, -0.05, 0)), 0.45, 0.6) };
+    return { trunk, leaves: shadeCanopy(merge(fronds), top.clone().add(new T.Vector3(0, -0.04, 0)), 0.45, 0.4), dead: merge(dead), nuts: merge(nuts) };
   }
 
   // 굽은 줄기 (높이 1, 굵기 r0)
@@ -408,21 +447,33 @@
     return g;
   }
 
-  // 열대 활엽수: 굵은 줄기 + 둥근 수관(잎 뭉치 판 여러 장)
+  // 열대 활엽수: 가는 줄기가 2~4갈래 가지로 갈라지고, 가지 끝마다 잎 뭉치(작은 판 여러 장) → 불규칙한 우산 모양 수관
+  // (예전엔 줄기 지름이 2m급이고 둥근 덩어리 하나라 브로콜리처럼 보였다)
   function broadleafGeometry(seed) {
     const rnd = I.rng.make(seed);
-    const lean = (rnd() - 0.5) * 0.15;
-    const trunk = trunkGeo((t) => new T.Vector3(lean * t * t, t * 0.62, 0), 0.05, 0.45, 10, 8);
-    const leaves = [];
-    const n = 38 + Math.floor(rnd() * 10);
-    // 수관 안에 작은 덩어리 2~3개 → 구름처럼 울퉁불퉁한 실루엣
-    const lobes = [0, 1, 2].map(() => new T.Vector3(lean + (rnd() - 0.5) * 0.3, 0.7 + rnd() * 0.16, (rnd() - 0.5) * 0.3));
-    for (let k = 0; k < n; k++) {
-      const lb = lobes[k % lobes.length], a = rnd() * Math.PI * 2, r = Math.sqrt(rnd()) * 0.25, h = (rnd() - 0.45) * 0.26;
-      const p = new T.Vector3(lb.x + Math.cos(a) * r, lb.y + h - r * 0.2, lb.z + Math.sin(a) * r);
-      leaves.push(card(0.26 + rnd() * 0.14, p, rnd() * Math.PI, -Math.PI / 2 + (rnd() - 0.5) * 1.4, (rnd() - 0.5) * 0.9));
+    const lean = (rnd() - 0.5) * 0.12, fork = 0.38 + rnd() * 0.12;
+    const parts = [trunkGeo((t) => new T.Vector3(lean * t * t * fork, t * fork, 0), 0.022, 0.25, 8, 8)];
+    const base = new T.Vector3(lean * fork, fork, 0), leaves = [];
+    const nb = 3 + Math.floor(rnd() * 2);
+    for (let b = 0; b < nb; b++) {
+      const az = (b / nb) * Math.PI * 2 + rnd() * 0.8, out = 0.18 + rnd() * 0.16, rise = 0.24 + rnd() * 0.18;
+      const tip = base.clone().add(new T.Vector3(Math.cos(az) * out, rise, Math.sin(az) * out));
+      const d = tip.clone().sub(base);
+      parts.push(trunkGeo((t) => base.clone().add(new T.Vector3(d.x * t, d.y * (1 - (1 - t) * (1 - t) * 0.3), d.z * t)).sub(new T.Vector3(0, base.y, 0)).add(new T.Vector3(0, base.y, 0)), 0.012, 0.55, 6, 6));
+      // 가지 끝 잎 뭉치: 납작한 타원체 모양으로 판을 흩뿌린다 (위가 넓고 아래가 평평한 우산)
+      const nl = 16 + Math.floor(rnd() * 8), rx = 0.17 + rnd() * 0.07, ry = 0.08 + rnd() * 0.04;
+      for (let k = 0; k < nl; k++) {
+        const a = rnd() * Math.PI * 2, r = Math.sqrt(rnd()), h = (rnd() - 0.35) * 2;
+        const p = tip.clone().add(new T.Vector3(Math.cos(a) * r * rx, h * ry, Math.sin(a) * r * rx));
+        leaves.push(card(0.11 + rnd() * 0.07, p, rnd() * Math.PI, -Math.PI / 2 + (rnd() - 0.5) * 1.1, (rnd() - 0.5) * 0.8));
+      }
     }
-    return { trunk, leaves: shadeCanopy(merge(leaves), new T.Vector3(lean, 0.72, 0), 0.75, 0.42) };
+    // 줄기 중간에도 잔가지 잎 몇 장 (수관 아래가 텅 비어 막대처럼 보이지 않게)
+    for (let k = 0; k < 6; k++) {
+      const p = base.clone().add(new T.Vector3((rnd() - 0.5) * 0.18, -0.05 + rnd() * 0.12, (rnd() - 0.5) * 0.18));
+      leaves.push(card(0.09 + rnd() * 0.05, p, rnd() * Math.PI, -Math.PI / 2 + (rnd() - 0.5) * 1.3, 0));
+    }
+    return { trunk: merge(parts), leaves: shadeCanopy(merge(leaves), base.clone().add(new T.Vector3(0, 0.3, 0)), 0.7, 0.45) };
   }
 
   // 바나나 나무: 짧은 줄기 + 크게 휘어지는 넓은 잎 몇 장
@@ -706,6 +757,10 @@
     R.rockGeo3 = rockGeometry(31);
     R.mats = {
       bark: new T.MeshStandardMaterial({ map: R.tex.bark.diff, normalMap: R.tex.bark.nor, roughnessMap: R.tex.bark.rough, color: '#c9b49a' }),
+      // 야자 줄기: 잿빛 도는 연갈색 + 마디 그늘(정점색)
+      palmBark: new T.MeshStandardMaterial({ map: R.tex.bark.diff, normalMap: R.tex.bark.nor, roughnessMap: R.tex.bark.rough, color: '#b5a68e', vertexColors: true }),
+      deadFrond: windify(new T.MeshStandardMaterial({ map: R.frondTex, alphaTest: 0.45, alphaToCoverage: true, color: '#a9844e', side: T.DoubleSide, roughness: 0.9 }), 0.03, true, true),
+      nut: new T.MeshStandardMaterial({ color: '#5a4a24', roughness: 0.6 }),
       // 야자·활엽수 잎은 법선을 수관 바깥으로 돌려 둔 것(shadeCanopy) → 뒷면에서 뒤집으면 위에서 볼 때 잎이 아래를 향해 시커멓게 보였다
       frond: windify(new T.MeshStandardMaterial({ map: R.frondTex, alphaTest: 0.45, alphaToCoverage: true, vertexColors: true, side: T.DoubleSide, roughness: 0.75 }), 0.06, true, true),
       grass: grassMaterial(),
@@ -748,7 +803,7 @@
   }
 
   // 생존자 캐릭터. 애니메이션 이름은 Quaternius Universal Animation Library 기준
-  const ANIM = { idle: 'Idle_Loop', walk: 'Walk_Loop', run: 'Jog_Fwd_Loop', sprint: 'Sprint_Loop', swim: 'Swim_Fwd_Loop', float: 'Swim_Idle_Loop', kneel: 'Fixing_Kneeling', sit: 'Sitting_Idle_Loop', jumpStart: 'Jump_Start', jumpLoop: 'Jump_Loop', jumpLand: 'Jump_Land' };
+  const ANIM = { idle: 'Idle_Loop', walk: 'Walk_Loop', run: 'Jog_Fwd_Loop', sprint: 'Sprint_Loop', swim: 'Swim_Fwd_Loop', float: 'Swim_Idle_Loop', kneel: 'Fixing_Kneeling', sit: 'Sitting_Idle_Loop', jumpStart: 'Jump_Start', jumpLoop: 'Jump_Loop', jumpLand: 'Jump_Land', roll: 'Roll' };
   // 생존자 옷: 기본 몸(속옷 차림) 위에 셔츠·바지·부츠를 셰이더로 입힌다.
   // 모델은 T자세(팔이 어깨 높이로 수평)라 몸 좌표의 높이·좌우 폭으로 부위를 나눈다
   function dressUp(o, gender) {
@@ -762,15 +817,21 @@
       g.computeBoundingBox();
       const bb = g.boundingBox, H = bb.max.y - bb.min.y;
       const mat = m.material.clone();
+      // 물속 부분: 수면 아래는 물빛으로 가라앉고 수면엔 하얀 물띠 (물에 들어가면 다리가 '잘린' 게 아니라 '잠긴' 걸로 보이게)
+      const uWater = { value: -99 };
+      mat.userData.uWater = uWater;
       mat.onBeforeCompile = (sh) => {
+        sh.uniforms.uWater = uWater;
+        sh.uniforms.uWind = R.wind;
         sh.uniforms.uB = { value: new T.Vector4(bb.min.y, H, C.sleeve, female ? 1 : 0) };
         sh.uniforms.uShirt = { value: new T.Color(C.shirt) };
         sh.uniforms.uPants = { value: new T.Color(C.pants) };
         sh.uniforms.uBoots = { value: new T.Color(C.boots) };
-        sh.vertexShader = sh.vertexShader.replace('#include <common>', '#include <common>\nvarying vec3 vLoc;').replace('#include <begin_vertex>', '#include <begin_vertex>\nvLoc = position;');
+        sh.vertexShader = sh.vertexShader.replace('#include <common>', '#include <common>\nvarying vec3 vLoc; varying vec3 vWp;').replace('#include <begin_vertex>', '#include <begin_vertex>\nvLoc = position;')
+          .replace('#include <worldpos_vertex>', '#include <worldpos_vertex>\nvWp = (modelMatrix * vec4(transformed, 1.0)).xyz;');
         sh.fragmentShader = sh.fragmentShader
           .replace('#include <common>', `#include <common>
-            varying vec3 vLoc; uniform vec4 uB; uniform vec3 uShirt, uPants, uBoots;
+            varying vec3 vLoc; varying vec3 vWp; uniform vec4 uB; uniform vec3 uShirt, uPants, uBoots; uniform float uWater, uWind;
             // x: 부츠, y: 바지, z: 셔츠 (몸 높이 0=발 ~ 1=머리, 좌우 폭은 몸 높이 기준)
             vec3 clothMask(){
               float y = (vLoc.y - uB.x) / uB.y, ax = abs(vLoc.x) / uB.y;
@@ -790,7 +851,18 @@
             diffuseColor.rgb = mix(diffuseColor.rgb, uShirt * weave * fold, cm.z);`)
           .replace('#include <normal_fragment_maps>', `#include <normal_fragment_maps>
             { vec3 cm2 = clothMask(); normal = normalize(mix(normal, geometryNormal, max(cm2.y, cm2.z) * 0.75)); } // 옷 위로 근육 결이 비치지 않게`)
-          .replace('#include <roughnessmap_fragment>', '#include <roughnessmap_fragment>\n{ vec3 cm3 = clothMask(); roughnessFactor = mix(roughnessFactor, 0.95, max(cm3.x, max(cm3.y, cm3.z))); }');
+          .replace('#include <roughnessmap_fragment>', '#include <roughnessmap_fragment>\n{ vec3 cm3 = clothMask(); roughnessFactor = mix(roughnessFactor, 0.95, max(cm3.x, max(cm3.y, cm3.z))); }')
+          .replace('#include <output_fragment>', `#include <output_fragment>
+            {
+              // 수면은 잔물결로 살짝 출렁인다
+              float wl = uWater + sin(vWp.x * 9.0 + uWind * 2.1) * 0.006 + sin(vWp.z * 7.0 - uWind * 1.7) * 0.005;
+              float under = smoothstep(0.004, -0.004, vWp.y - wl);
+              float depth = clamp((wl - vWp.y) / 0.35, 0.0, 1.0);
+              vec3 wat = vec3(0.16, 0.42, 0.44);
+              gl_FragColor.rgb = mix(gl_FragColor.rgb, mix(gl_FragColor.rgb * 0.55, wat * 0.5, depth * 0.7), under * 0.85);
+              float line = (1.0 - smoothstep(0.0, 0.016, abs(vWp.y - wl))) * step(-90.0, uWater);
+              gl_FragColor.rgb = mix(gl_FragColor.rgb, vec3(0.95, 0.98, 1.0), line * 0.9);
+            }`);
       };
       m.material = mat;
     });
@@ -833,9 +905,12 @@
       const clip = R.clips.find((c) => c.name === name);
       if (!clip) continue;
       actions[key] = mixer.clipAction(clip);
-      if (key === 'jumpStart' || key === 'jumpLand' || key === 'kneel') { actions[key].setLoop(T.LoopOnce, 1); actions[key].clampWhenFinished = true; }
+      if (key === 'jumpStart' || key === 'jumpLand' || key === 'kneel' || key === 'roll') { actions[key].setLoop(T.LoopOnce, 1); actions[key].clampWhenFinished = true; }
     }
-    return { obj: wrap, mixer, actions, gender };
+    const wetMats = [];
+    o.traverse((m) => { if (m.isMesh && m.material && m.material.userData && m.material.userData.uWater) wetMats.push(m.material.userData.uWater); });
+    const setWater = (y) => { for (const u of wetMats) u.value = y; }; // 수면 높이(없으면 -99)
+    return { obj: wrap, mixer, actions, gender, setWater };
   }
 
   I.real = { R, loadAll, character, merge };

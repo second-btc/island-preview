@@ -15,7 +15,7 @@
   function create(seed) {
     const now = Date.now();
     return {
-      v: 5,
+      v: 6,
       seed,
       plots: fillPlots(I.island.generate(C.ISLAND_SEED, seed)), // 모양은 고정, 보물 배치만 시즌마다 새로
       me: { tokens: 0, flags: C.FLAGS_MAX, flagAt: now },
@@ -35,7 +35,7 @@
   function load() {
     try {
       const s = JSON.parse(localStorage.getItem(C.SAVE_KEY));
-      if (!s || s.v !== 5 || !Array.isArray(s.plots)) return null;
+      if (!s || s.v !== 6 || !Array.isArray(s.plots)) return null;
       fillPlots(s.plots);
       return s;
     } catch (e) {

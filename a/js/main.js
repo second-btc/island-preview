@@ -28,6 +28,15 @@
     return a === '으로' ? (jong && jong !== 8 ? a : b) : jong ? a : b;
   }
 
+  const online = () => I.net && I.net.online;
+  const NET_WHY = {
+    protected: '그새 주인이 순찰을 돌아 다시 지키고 있어요.', already_mine: '이미 내 땅이에요.', no_flag: '깃발이 없어요.',
+    lot_cap: '지금은 섬이 붐벼서 한 사람이 가질 수 있는 구획이 줄었어요.', too_fast: '조금 천천히 눌러 주세요.',
+    poor: '토큰이 모자라요.', built: '이미 지었어요.', stage: '문명이 더 발전해야 지을 수 있어요.', no_crate: '상자가 아직 떠밀려 오지 않았어요.',
+    full: '빈방이 없어요.', has_land: '내 땅이 있으면 세들 수 없어요.', no_owner: '주인 없는 땅이에요. 깃발을 꽂아 보세요.', not_mine: '내 땅이 아니에요.',
+  };
+  const netWhy = (e) => NET_WHY[e && e.code] || '섬과 연결이 잠깐 끊겼어요. 다시 해 보세요.';
+
   function hms(ms) {
     const s = Math.ceil(ms / 1000), h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), x = s % 60;
     return h ? `${h}시간 ${m}분` : m ? `${m}분 ${x}초` : `${x}초`;
@@ -58,7 +67,37 @@
     return h + `</span><small>${GLINT[n]}</small>`;
   }
 
+  // ---------- 낙하 지점: 지도에서 누른 자리에 '여기로 내려가기' 버튼을 띄운다 ----------
+  let dropPt = null, dropRaf = 0;
+  function setDrop(pt) {
+    dropPt = pt && !questing && !walking() ? pt : null;
+    const el = $('#dropPin');
+    el.hidden = !dropPt;
+    if (dropPt && !dropRaf) dropRaf = requestAnimationFrame(paintDrop);
+  }
+  // 섬을 돌리거나 확대해도 버튼이 그 자리를 따라간다
+  function paintDrop() {
+    dropRaf = 0;
+    if (!dropPt) return;
+    if (walking() || I.world.mode() !== 'game') return setDrop(null);
+    const el = $('#dropPin'), s = I.world.toScreen(dropPt.x, dropPt.y, dropPt.z);
+    el.style.visibility = s.on ? '' : 'hidden';
+    el.style.transform = `translate(${s.x.toFixed(1)}px, ${s.y.toFixed(1)}px)`;
+    // 화면 가장자리에선 버튼이 잘리거나 상단바에 가리지 않게 안쪽으로 비킨다
+    const bw = el.firstElementChild.offsetWidth, W = window.innerWidth, top = $('.topbar').getBoundingClientRect().bottom;
+    el.style.setProperty('--dx', `${Math.max(8 + bw / 2 - s.x, Math.min(0, W - 8 - bw / 2 - s.x)).toFixed(1)}px`);
+    el.classList.toggle('below', s.y - 80 < top);
+    dropRaf = requestAnimationFrame(paintDrop);
+  }
+  function dropHere() {
+    const pt = dropPt;
+    if (!pt || questing) return;
+    setDrop(null);
+    setView('walk', pt);
+  }
+
   function select(id) {
+    setDrop(null); // 목록·카드에서 고르면 낙하 표시는 지운다 (지도를 누른 경우엔 onPick이 다시 띄움)
     sel = id;
     I.world.select(id);
     // 지도에서 고른 땅이 카드에 가리지 않게 카메라를 맞춘다 (world.focusPlot이 있을 때만)
@@ -86,6 +125,56 @@
     if (lockLeft(p)) { const f = terrainTxt(p); return `<button class="btn big" disabled>${f.ico} ${f.wait}… <span data-live="wait"></span></button>`; }
     if (S.me.flags < 1) return '<button class="btn big" disabled>🚩 깃발 충전 중 · <span data-live="flag"></span></button>';
     return `<button class="btn primary big" id="${id}" ${questing ? 'disabled' : ''}>${raid ? '⚔️ 빼앗기' : '🚩 깃발 꽂기'} <small>(남은 깃발 ${S.me.flags})</small></button>`;
+  }
+
+  // ---------- 임대 (공유 섬) ----------
+  // 세입자 수용: 주인 문명 단계별 최대치(천막 2 → 공동주택 16 → 결정탑 24)와 주인이 정한 인원 중 작은 쪽
+  const STAGE_CAP = [2, 4, 8, 16, 24];
+  const capOf = (p) => Math.min(STAGE_CAP[Math.min(4, p.ownerStage || 0)], p.tenantCap === null || p.tenantCap === undefined ? 99 : p.tenantCap);
+  const pct = (r) => Math.round((r === undefined || r === null ? 0.3 : r) * 100);
+  // 남의 땅(플레이어 소유) 카드: 빈방·임대료 + 천막 치기 / 이사
+  function rentHtml(p) {
+    if (!online() || !p.owner || !String(p.owner).startsWith('p:')) return '';
+    const n = p.tenants || 0, cap = capOf(p), here = S.me.tenantOf === p.id, hasLand = I.guard.mine(S).length > 0;
+    const keep = 100 - pct(p.rent);
+    let btn = '';
+    if (here) btn = '<p class="muted small">⛺ 여기 세 들어 살고 있어요. 이 땅에서 캐는 토큰의 몫을 받아요.</p><button class="btn" data-rent-leave>이사 나가기</button>';
+    else if (hasLand) btn = '<p class="muted small">내 땅이 있으면 세 들 수 없어요.</p>';
+    else if (n >= cap) btn = '<button class="btn big" disabled>⛺ 빈방이 없어요</button>';
+    else btn = `<button class="btn primary big" data-rent-join="${p.id}">⛺ 여기 천막 치기 <small>(내 몫 ${keep}%)</small></button>`;
+    return `<div class="rent-box"><div class="row"><span>⛺ 세입자</span><b>${n} / ${cap}명</b></div><div class="row"><span>임대료</span><b>${pct(p.rent)}%</b></div>${btn}</div>`;
+  }
+  // 내 땅 카드: 임대 설정 (임대료 0~70%, 받을 인원 0~단계 최대치)
+  function rentSetHtml(p) {
+    if (!online()) return '';
+    const stageMax = STAGE_CAP[Math.min(4, S.me.stage || 0)], cap = p.tenantCap === null || p.tenantCap === undefined ? stageMax : p.tenantCap;
+    return `<div class="rent-set"><div class="row"><span>⛺ 세입자</span><b>${p.tenants || 0}명</b></div>
+      <label class="rs-row"><span>임대료 <b data-rs-rent-v>${pct(p.rent)}%</b></span><input type="range" min="0" max="70" step="5" value="${pct(p.rent)}" data-rs-rent></label>
+      <label class="rs-row"><span>받을 인원 <b data-rs-cap-v>${cap}명</b></span><input type="range" min="0" max="${stageMax}" step="1" value="${Math.min(cap, stageMax)}" data-rs-cap></label>
+      <p class="muted small">세입자는 이 땅 채굴량의 15%를 새로 만들어요. 그중 임대료만큼이 내 몫이에요. 세입자가 순찰하면 내 땅 보호도 채워져요.</p>
+      <button class="btn" data-rs-save="${p.id}">임대 설정 저장</button></div>`;
+  }
+  function bindRent(el) {
+    el.querySelectorAll('[data-rent-join]').forEach((b) => {
+      b.onclick = () => {
+        b.disabled = true;
+        I.net.rentJoin(+b.dataset.rentJoin).then(() => { toast('⛺ 천막을 쳤어요. 이제 이 땅에서 캐는 토큰의 몫을 받아요', 'good'); track('rent_join', { plot: +b.dataset.rentJoin }); I.world.sync(S.plots); hud(); panel(); if (walking()) walkHud(); },
+          (e) => { b.disabled = false; toast(netWhy(e), 'warn'); });
+      };
+    });
+    el.querySelectorAll('[data-rent-leave]').forEach((b) => {
+      b.onclick = () => I.net.rentLeave().then(() => { toast('천막을 걷었어요'); track('rent_leave', {}); I.world.sync(S.plots); hud(); panel(); if (walking()) walkHud(); }, (e) => toast(netWhy(e), 'warn'));
+    });
+    el.querySelectorAll('[data-rs-rent]').forEach((r) => { r.oninput = () => { el.querySelector('[data-rs-rent-v]').textContent = r.value + '%'; }; });
+    el.querySelectorAll('[data-rs-cap]').forEach((r) => { r.oninput = () => { el.querySelector('[data-rs-cap-v]').textContent = r.value + '명'; }; });
+    el.querySelectorAll('[data-rs-save]').forEach((b) => {
+      b.onclick = () => {
+        const rent = +el.querySelector('[data-rs-rent]').value / 100, cap = +el.querySelector('[data-rs-cap]').value, p = plotById(+b.dataset.rsSave);
+        const up = p && rent > (p.rent || 0) && (p.tenants || 0) > 0;
+        I.net.setRent(+b.dataset.rsSave, rent, cap).then(() => { toast(up ? '임대 설정을 저장했어요 · 오른 임대료는 기존 세입자에게 24시간 뒤부터 적용돼요' : '임대 설정을 저장했어요', 'good'); track('rent_set', { rent, cap }); I.net.poll(); },
+          (e) => toast(netWhy(e), 'warn'));
+      };
+    });
   }
 
   // ---------- 땅 지키기 ----------
@@ -119,7 +208,17 @@
     el.querySelectorAll('[data-build]').forEach((btn) => {
       btn.onclick = () => {
         const p = plotFn(), key = btn.dataset.build, b = C.BUILDINGS[key];
-        if (!p || !I.guard.build(S, p, key, Date.now())) return;
+        if (!p) return;
+        if (online()) {
+          btn.disabled = true;
+          I.net.build(p.id, key).then(() => {
+            track('build', { plot: p.id, building: key });
+            toast(`${b.icon} <b>${b.name}</b>${jo(b.name, '을/를')} 지었어요. 이 땅이 더 단단해졌어요`, 'good');
+            I.world.sync(S.plots); hud(); panel(); if (walking()) walkHud();
+          }, (e) => { btn.disabled = false; toast(netWhy(e), 'warn'); });
+          return;
+        }
+        if (!I.guard.build(S, p, key, Date.now())) return;
         track('build', { plot: p.id, building: key });
         toast(`${b.icon} <b>${b.name}</b>${jo(b.name, '을/를')} 지었어요. 이 땅이 더 단단해졌어요`, 'good');
         I.world.sync(S.plots);
@@ -205,6 +304,16 @@
     if (i < 0) return;
     S.crates.splice(i, 1);
     if (!isFinite(S.nextCrateAt) || S.nextCrateAt < Date.now()) S.nextCrateAt = Date.now() + C.CRATE_SEC * 1000;
+    if (online()) {
+      // 보상은 서버가 정한다 (상자 자리는 화면에만 있고, 45분에 3개라는 제한도 서버가 센다)
+      I.net.crate().then((r) => {
+        if (r.reward === 'flag') { toast('📦 보급 상자에서 <b>⚑ 깃발 1개</b>가 나왔어요!', 'good'); track('crate_open', { reward: 'flag' }); }
+        else { toast(`📦 보급 상자 · <b>💎 +${fmt(r.amount)}</b>`, 'good'); track('crate_open', { reward: 'tokens', amount: r.amount }); }
+        I.state.save(S); hud(); panel(); if (walking()) walkHud();
+      }, (e) => toast('📦 ' + netWhy(e), 'warn'));
+      I.world.setCrates(S.crates);
+      return;
+    }
     const [lo, hi] = C.CRATE_TOKENS;
     if (Math.random() < C.CRATE_FLAG_CHANCE && S.me.flags < C.FLAGS_MAX) {
       S.me.flags++;
@@ -229,12 +338,13 @@
 
   // 순찰: 내 땅 전부의 보호 시간을 다시 채운다
   function patrolAll(silent) {
+    if (online()) I.net.patrol().catch((e) => { if (!silent) toast(netWhy(e), 'warn'); });
     const n = I.guard.patrol(S, Date.now());
     if (n) track('patrol', { plots: n });
     I.world.sync(S.plots);
     I.state.save(S);
     hud(); panel();
-    if (!silent) toast(n ? `🔥 순찰 완료 · 내 땅 ${I.guard.mine(S).length}필지의 보호 시간을 다시 가득 채웠어요` : '모든 땅이 이미 든든하게 지켜지고 있어요', 'good');
+    if (!silent) toast(n ? `🔥 순찰 완료 · 내 땅 ${I.guard.mine(S).length}구획의 보호 시간을 다시 가득 채웠어요` : '모든 땅이 이미 든든하게 지켜지고 있어요', 'good');
   }
 
   // ---------- HUD / 하단 카드 ----------
@@ -248,12 +358,14 @@
     // 다시 온 사람: 표지에서도 내 섬 요약이 보이고 버튼은 '돌아가기'
     const myN = I.guard.mine(S).length;
     $('#btnEnter').textContent = myN ? '내 섬으로 돌아가기' : '섬에 상륙하기';
-    setHtml($('#heroMine'), myN ? `🏡 내 땅 <b>${myN}필지</b> · 💎 <b>${narrowBar() ? compact(S.me.tokens) : fmt(S.me.tokens)}</b>${S.me.flags ? ` · ⚑ 깃발 ${S.me.flags}개` : ''}` : '');
+    setHtml($('#heroMine'), myN ? `🏡 내 땅 <b>${myN}구획</b> · 💎 <b>${narrowBar() ? compact(S.me.tokens) : fmt(S.me.tokens)}</b>${S.me.flags ? ` · ⚑ 깃발 ${S.me.flags}개` : ''}` : '');
     $('#heroMine').hidden = !myN;
     // 아직 아무도 안 가져갔으면 '줄어드는 중'이라고 하지 않는다
     $('#heroLive').textContent = free < total ? '지금도 줄어드는 중' : '첫 정착자를 기다리는 중';
     $('#heroLiveBox').classList.toggle('calm', free >= total);
-    $('#hudTime').textContent = I.world.timeLabel ? I.world.timeLabel() : '';
+    const fixed = I.world.getPhase && I.world.getPhase() !== null;
+    $('#hudTime').textContent = (I.world.timeLabel ? I.world.timeLabel() : '') + (fixed ? ' 고정' : '');
+    $('#hudTime').classList.toggle('fixed', fixed);
     let f = '';
     for (let i = 0; i < C.FLAGS_MAX; i++) f += `<i class="${i < S.me.flags ? 'on' : ''}">⚑</i>`;
     setHtml($('#hudFlags'), f);
@@ -304,10 +416,10 @@
     const now = Date.now(), order = { open: 0, warn: 1, safe: 2 };
     const rows = mine.map((q) => ({ q, st: I.guard.status(q, now) })).sort((a, b) => order[a.st] - order[b.st] || a.q.id - b.q.id);
     const need = rows.filter((r) => r.st !== 'safe').length, openN = rows.filter((r) => r.st === 'open').length;
-    return `<h3>내 땅 <span class="tag">${mine.length}필지</span><small class="mp-cap">남은 매장량</small></h3>
+    return `<h3>내 땅 <span class="tag">${mine.length}구획</span><small class="mp-cap">남은 매장량</small></h3>
       <div class="mylist">${rows.map(({ q, st }) => `<button class="myplot ${st}" data-plot="${q.id}"><span class="mp-name">${STATUS_ICO[st]} ${plotName(q)} #${q.id}${q.reserve >= jackpot ? '<i class="mp-gold">대박</i>' : ''}</span><span class="mp-num" data-live="left" data-of="${q.id}"></span></button>`).join('')}</div>
       ${need
-        ? `<button class="btn primary big" data-patrol>🔥 지금 순찰하기 <small>(${openN ? `${openN}필지가 무방비예요` : `${need}필지 보호가 곧 끝나요`})</small></button>`
+        ? `<button class="btn primary big" data-patrol>🔥 지금 순찰하기 <small>(${openN ? `${openN}구획가 무방비예요` : `${need}구획 보호가 곧 끝나요`})</small></button>`
         : S.me.flags < 1 ? nextGoalHtml() : '<p class="muted small mp-tip">땅을 누르면 자세히 볼 수 있어요 · 빈 땅에 깃발을 꽂아 더 넓혀 보세요</p>'}`;
   }
   // 깃발을 다 쓴 뒤: 다음 깃발까지 남은 시간 + 그동안 할 일 (작은 회색 타이머만 남으면 다시 올 이유가 안 보인다)
@@ -333,6 +445,7 @@
         if (b) b.onclick = () => challenge(plotById(sel));
         bindBuilds(el, () => plotById(sel));
         bindCard(el);
+        bindRent(el);
         paintMore();
       }
       fillLive(el, p);
@@ -347,7 +460,7 @@
         <ul class="how">
           <li><b>✦</b><span>토큰이 빛나는 땅일수록 매장량이 많아요</span></li>
           <li><b>🚩</b><span>정착 깃발은 구조선이 ${C.FLAG_REGEN_SEC / 3600}시간마다 1개씩 실어 와요</span></li>
-          <li><b>🚶</b><span><strong>섬 걷기</strong>로 마지막 섬을 직접 둘러보세요</span></li>
+          <li><b>🪂</b><span>섬 아무 곳이나 누르면 그 자리로 <strong>바로 내려갈</strong> 수 있어요</span></li>
         </ul>${resetLink}`);
       return;
     }
@@ -378,6 +491,7 @@
           <div class="row"><span>처음 매장량</span><b>💎 ${fmt(p.reserve)}</b></div>
           <div class="row"><span>다시 차오름</span><span class="small">${regen}</span></div>
           ${buildHtml(p)}
+          ${rentSetHtml(p)}
         </div>`);
       return;
     }
@@ -388,10 +502,19 @@
       ${guardHtml(p)}
       ${canRaid(p)
         ? `<p class="muted small">순찰이 끊긴 땅이에요. 평소보다 ${I.guard.extraHits(p)}번 더 성공하면 빼앗을 수 있어요.</p>${claimButton(p, 'btnGo', true)}`
-        : '<p class="muted small">주인이 지키고 있는 땅이에요. 순찰이 끊기면 빼앗을 수 있어요.</p>'}`);
+        : '<p class="muted small">주인이 지키고 있는 땅이에요. 순찰이 끊기면 빼앗을 수 있어요.</p>'}
+      ${rentHtml(p)}`);
   }
 
   // 1인칭: 발밑 땅 안내 + 깃발 꽂기
+  // 물속 상태 한 줄: 발목·무릎까지 잠겼는지, 헤엄치는지 (투명한 물에 다리가 잠기면 '잘린' 것처럼 보여서 글로도 알려 준다)
+  function wetHtml() {
+    const w = I.world.wet ? I.world.wet() : null;
+    if (!w || w.depth < 0.06) return '';
+    const t = w.depth > 0.3 ? '🏊 헤엄치는 중' : w.depth > 0.18 ? '💦 허리까지 물속 · 천천히 걸어요' : '💦 무릎까지 물속';
+    return `<div class="wh-state">${t}</div>`;
+  }
+
   function walkHud() {
     const el = $('#walkHud');
     const p = I.world.walkPlot();
@@ -413,12 +536,14 @@
     else
       html = `<div class="wh-title" style="color:${ownerColor(p.owner)}">🚩 ${ownerName(p.owner)}의 땅 · #${p.id}</div>
         ${guardHtml(p)}
-        ${canRaid(p) ? claimButton(p, 'btnWalkGo', true) + '<div class="muted small wh-key">PC는 <b>E</b> 키로도 빼앗을 수 있어요</div>' : '<div class="muted small">다른 생존자 무리의 땅이에요. 지나가는 건 괜찮아요.</div>'}`;
+        ${canRaid(p) ? claimButton(p, 'btnWalkGo', true) + '<div class="muted small wh-key">PC는 <b>E</b> 키로도 빼앗을 수 있어요</div>' : rentHtml(p) || '<div class="muted small">다른 생존자 무리의 땅이에요. 지나가는 건 괜찮아요.</div>'}`;
+    html = wetHtml() + html;
     if (setHtml(el, html)) {
       const b = el.querySelector('#btnWalkGo');
       if (b) b.onclick = () => challenge(I.world.walkPlot());
       bindBuilds(el, () => I.world.walkPlot());
       bindCard(el);
+      bindRent(el);
       paintMore();
     }
     fillLive(el, p);
@@ -479,6 +604,7 @@
       return;
     }
     questing = p.id;
+    setDrop(null);
     I.world.setInput(false);
     const d = I.difficulty.of(S, p);
     const veteran = I.guard.mine(S).length > 0 || S.log.some((e) => e.type === 'claim' && e.by === 'me');
@@ -498,18 +624,23 @@
     panel();
 
     const victim = p.owner;
-    q.play($('#modal').querySelector('.q-body'), d, opts).then((res) => {
-      questing = null;
+    q.play($('#modal').querySelector('.q-body'), d, opts).then(async (res) => {
       // 그만두기: 잠금·실패 기록 없이 닫는다 (깃발도 그대로)
-      if (res.cancelled) { track('core_quit', { plot: p.id, quest: q.id }); closeModal(); hud(); panel(); toast('그만뒀어요 · 깃발은 그대로예요'); return; }
-      const stillOk = raid ? p.owner === victim && canRaid(p) : !p.owner;
+      if (res.cancelled) { questing = null; track('core_quit', { plot: p.id, quest: q.id }); closeModal(); hud(); panel(); toast('그만뒀어요 · 깃발은 그대로예요'); return; }
+      // 공유 섬: 성공하면 서버에 깃발을 꽂아 본다 (그새 다른 사람이 먼저 꽂았으면 서버가 거절)
+      let netErr = null;
+      if (res.success && online()) { try { await I.net.claim(p.id); } catch (e) { netErr = e; } }
+      questing = null;
+      const stillOk = online() ? !netErr : raid ? p.owner === victim && canRaid(p) : !p.owner;
       if (res.success && stillOk) {
         p.owner = 'me';
         p.tendedAt = Date.now();
         p.buildings = [];
         revealing = p.id; // 결과 창(매장량 공개)을 닫을 때까지 카드는 숫자를 숨긴다
-        if (S.me.flags >= C.FLAGS_MAX) S.me.flagAt = Date.now();
-        S.me.flags--;
+        if (!online()) {
+          if (S.me.flags >= C.FLAGS_MAX) S.me.flagAt = Date.now();
+          S.me.flags--;
+        }
         I.state.log(S, { type: 'claim', plotId: p.id, by: 'me' });
         track('core_success', { plot: p.id, reserve: p.reserve, raid });
         if (raid) track('raid_win', { plot: p.id, from: victim });
@@ -533,7 +664,7 @@
         const late = !!res.success;
         // 퀘스트가 자기 말로 알려 주면(prog·why·ico) 그걸 쓰고, 아니면 지형 문구
         const prog = res.prog || (res.need ? (res.hits ? `<b>${res.hits}/${res.need}</b>까지 성공` : `첫 번째에서 놓쳤어요 · <b>0/${res.need}</b>`) : '');
-        const why = late ? (raid ? '그새 주인이 순찰을 돌아 다시 지키고 있어요.' : '그새 다른 무리가 먼저 깃발을 꽂았어요.') : raid ? '방어를 뚫지 못했어요.' : res.why || f.fail + '.';
+        const why = netErr ? (netErr.code === 'protected' && !raid ? '그새 다른 사람이 먼저 깃발을 꽂았어요.' : netWhy(netErr)) : late ? (raid ? '그새 주인이 순찰을 돌아 다시 지키고 있어요.' : '그새 다른 무리가 먼저 깃발을 꽂았어요.') : raid ? '방어를 뚫지 못했어요.' : res.why || f.fail + '.';
         showModal(`
           <div class="card center">
             <div class="big-emoji">${late ? '⏱️' : raid ? '🛡' : res.ico || f.ico}</div>
@@ -643,7 +774,7 @@
       <div class="card center">
         <div class="big-emoji">⚠️</div>
         <h3>처음부터 다시 시작할까요?</h3>
-        <p class="muted">땅 <b>${n}필지</b> · 토큰 <b>${fmt(S.me.tokens)}개</b> · 생존자 선택이<br>모두 사라져요. 되돌릴 수 없어요.</p>
+        <p class="muted">땅 <b>${n}구획</b> · 토큰 <b>${fmt(S.me.tokens)}개</b> · 생존자 선택이<br>모두 사라져요. 되돌릴 수 없어요.</p>
         <button class="btn primary big" id="btnKeep">그대로 두기</button>
         <button class="btn big danger" id="btnWipe">모두 지우고 처음부터</button>
       </div>`, closeModal);
@@ -697,10 +828,10 @@
     const needPatrol = I.guard.mine(S).filter((p) => I.guard.status(p, Date.now()) !== 'safe').length;
     if (!r || (r.mined < 1 && !r.taken && !r.flags && !r.lost && !needPatrol)) return;
     const lines = [];
-    if (r.lost) lines.push(`<div class="row lost"><span>⚔️ 순찰이 끊겨 빼앗긴 내 땅${r.lostIds && r.lostIds.length ? ' · ' + r.lostIds.slice(0, 4).map((id) => '#' + id).join(', ') + (r.lostIds.length > 4 ? ' …' : '') : ''}</span><b>${r.lost}필지</b></div>`);
-    if (needPatrol) lines.push(`<div class="row warnrow"><span>🔥 순찰이 필요한 내 땅</span><b>${needPatrol}필지</b></div>`);
+    if (r.lost) lines.push(`<div class="row lost"><span>⚔️ 순찰이 끊겨 빼앗긴 내 땅${r.lostIds && r.lostIds.length ? ' · ' + r.lostIds.slice(0, 4).map((id) => '#' + id).join(', ') + (r.lostIds.length > 4 ? ' …' : '') : ''}</span><b>${r.lost}구획</b></div>`);
+    if (needPatrol) lines.push(`<div class="row warnrow"><span>🔥 순찰이 필요한 내 땅</span><b>${needPatrol}구획</b></div>`);
     if (r.mined >= 1) lines.push(`<div class="row"><span>✨ 그동안 캔 토큰</span><b>💎 ${fmt(r.mined)}</b></div>`);
-    if (r.taken) lines.push(`<div class="row"><span>🚩 다른 무리가 차지한 땅</span><b>${r.taken}필지</b></div>`);
+    if (r.taken) lines.push(`<div class="row"><span>🚩 다른 무리가 차지한 땅</span><b>${r.taken}구획</b></div>`);
     if (r.flags > 0) lines.push(`<div class="row"><span>⚑ 구조선이 실어 온 깃발</span><b>+${r.flags}</b></div>`);
     showModal(`
       <div class="card">
@@ -721,7 +852,7 @@
     I.state.regenFlags(S, now);
     if (refillCrates()) { I.world.setCrates(S.crates); I.state.save(S); panel(); }
     crateHint();
-    if (!S.over) {
+    if (!S.over && !online()) {
       const ev = I.rivals.tick(S, now, questing);
       if (ev) rivalEvent(ev, true);
       checkOver();
@@ -734,7 +865,7 @@
   }
 
   // ---------- 화면 전환 ----------
-  function setView(v) {
+  function setView(v, dropTo) {
     $('#hero').hidden = v !== 'hero';
     $('#game').hidden = v === 'hero';
     $('#game').classList.toggle('walking', v === 'walk');
@@ -742,11 +873,12 @@
       b.textContent = v === 'walk' ? '🗺️ 지도' : '🚶 섬 걷기';
       b.setAttribute('aria-label', v === 'walk' ? '지도로 돌아가기' : '섬 걷기');
     }
+    if (v !== 'game') setDrop(null);
     if (v === 'walk') {
-      I.world.enterWalk(sel ? plotById(sel) : null);
+      if (!(dropTo && I.world.dropAt(dropTo.x, dropTo.z))) I.world.enterWalk(sel ? plotById(sel) : null);
       $('#walkHud').dataset.html = '';
       setTimeout(walkHud, 50);
-      track('walk_start', {});
+      track('walk_start', dropTo ? { drop: true } : {});
     } else {
       I.world.setMode(v);
     }
@@ -768,6 +900,7 @@
     $('#modal').querySelectorAll('.pick-card').forEach((b) => {
       b.onclick = () => {
         S.me.gender = b.dataset.g;
+        if (online()) I.net.setGender(S.me.gender).catch(() => {});
         I.world.setCharacter(S.me.gender);
         track('pick_character', { gender: S.me.gender });
         I.state.save(S);
@@ -845,16 +978,18 @@
       const q = plotById(e.plotId), tn = q ? plotName(q) + ' ' : '';
       feed(`<b style="color:${ownerColor(e.by)}">🚩 ${ownerName(e.by)}</b> · ${tn}#${e.plotId}에 정착${e.by === 'me' ? '!' : ''}`, e.by === 'me' ? 'me' : '');
     });
-    const back = catchUp(); // 자리 비운 동안 바뀐 주인은 섬에 다시 칠한다
+    const wantNet = I.net && !I.net.offline;
+    const back = wantNet ? null : catchUp(); // 자리 비운 동안 바뀐 주인은 섬에 다시 칠한다 (공유 섬이면 서버가 알려 준다)
     if (back) I.world.sync(S.plots);
     refillCrates();
     I.world.setCrates(S.crates);
     I.world.onCrate(openCrate);
-    I.world.onPick((p) => select(p ? p.id : null));
+    I.world.onPick((p, pt) => { select(p ? p.id : null); setDrop(pt); });
     if (S.me.gender) I.world.setCharacter(S.me.gender);
     I.world.onWalkPlot((p) => {
       if (p && p.owner === 'me' && I.guard.status(p, Date.now()) !== 'safe') {
         I.guard.patrol(S, Date.now(), p);
+        if (online()) I.net.patrol(p.id).catch(() => {});
         track('patrol', { plots: 1, walk: true });
         toast(`🔥 #${p.id} 순찰 완료 · 보호가 다시 채워졌어요`, 'good');
         I.world.sync(S.plots);
@@ -885,13 +1020,24 @@
     $('#brand').onclick = showHero;
     $('#btnWalk').onclick = toggleWalk;
     $('#btnWalkFab').onclick = toggleWalk;
+    $('#btnDrop').onclick = dropHere;
+    // 시간대 고르기(테스트용): 상단 시간 칩을 누르면 자동 → 새벽 → 낮 → 노을 → 밤 → 자동
+    const PHASES = [[null, '자동'], [0.02, '새벽'], [0.4, '낮'], [0.7, '노을'], [0.85, '밤']];
+    $('#hudTime').title = '눌러서 시간대 바꾸기 (자동 → 새벽 → 낮 → 노을 → 밤)';
+    $('#hudTime').onclick = () => {
+      const cur = I.world.getPhase ? I.world.getPhase() : null;
+      const i = PHASES.findIndex(([v]) => v === cur), nx = PHASES[(i + 1) % PHASES.length];
+      I.world.setPhase(nx[0]);
+      toast(nx[0] === null ? '🕒 시간대: 자동 (실제 시간을 따라가요)' : `🕒 시간대 고정: ${nx[1]}`, 'good');
+      hud();
+    };
     $('#btnJump').addEventListener('pointerdown', (e) => { e.preventDefault(); e.stopPropagation(); I.world.jump(); });
     $('#btnReset').onclick = confirmReset;
     // 모달: Esc 또는 바깥(어두운 곳)을 누르면 '닫기'가 허락된 창만 닫힌다
     document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && escFn && !$('#modal').hidden) { e.preventDefault(); escFn(); } });
     $('#modal').addEventListener('click', (e) => { if (e.target === e.currentTarget && escFn && !escFn.noBackdrop) escFn(); });
     // 터치 기기엔 휠이 없다
-    $('#hint').textContent = touchUI() ? '드래그로 돌리기 · 두 손가락으로 확대' : '드래그해서 섬을 돌려보세요 · 휠로 확대';
+    $('#hint').textContent = touchUI() ? '드래그로 돌리기 · 누른 곳으로 🪂 낙하' : '드래그로 돌리기 · 휠로 확대 · 누른 곳으로 🪂 낙하';
     // 떠 있는 걷기 버튼은 모바일·터치에서만. CSS가 늦게(옛 캐시) 받아져도 데스크톱에 튀어나오지 않게 hidden으로도 막는다
     const fabMq = window.matchMedia ? matchMedia('(max-width: 760px), (hover: none) and (pointer: coarse)') : null;
     const paintFab = () => { $('#btnWalkFab').hidden = !(fabMq && fabMq.matches); };
@@ -907,6 +1053,51 @@
     // 끝난 판을 다시 열면 결과 화면부터, 아니면 복귀 인사
     if (S.over) { S.over = false; checkOver(); }
     else welcomeBack(back);
+    if (wantNet) connectShared();
+  }
+
+  // ---------- 공유 섬 연결 ----------
+  // 서버 시즌의 보물 배치로 구획을 맞추고(섬 모양은 같고 매장량·신호만 다름), 이후 바뀐 구획을 10초마다 받는다
+  function connectShared() {
+    let first = true;
+    I.net.start(S, {
+      season(se) { location.reload(); }, // 새 시즌(감염 폭풍 뒤): 새 섬으로 다시 연다
+      lots(changed) {
+        if (first) { first = false; return; }
+        for (const c of changed) {
+          if (c.from === 'me' && c.to !== 'me') {
+            const who = c.to ? ownerName(c.to) : '누군가';
+            toast(`⚔️ 순찰이 끊긴 내 땅 #${c.p.id}${jo(c.p.id, '을/를')} <b>${who}</b>${jo(who, '이/가')} 빼앗아 갔어요`, 'warn');
+            feed(`<b style="color:${c.to ? ownerColor(c.to) : '#aaa'}">⚔️ ${who}</b> · 내 땅 #${c.p.id}${jo(c.p.id, '을/를')} 빼앗음`, 'lost');
+            track('plot_lost', { plot: c.p.id, by: c.to, live: true });
+          } else if (c.to && c.to !== 'me') {
+            feed(`<b style="color:${ownerColor(c.to)}">🚩 ${ownerName(c.to)}</b> · ${plotName(c.p)} #${c.p.id}에 정착`);
+            if (inGame && c.p.id === sel && !questing) toast(`앗! <b>${ownerName(c.to)}</b>${jo(ownerName(c.to), '이/가')} 보고 있던 땅에 먼저 정착했어요`, 'warn');
+          }
+        }
+        I.world.sync(S.plots);
+        hud(); panel(); if (walking()) walkHud();
+      },
+      me() { hud(); },
+    }).then((ok) => {
+      if (!ok) { const b = catchUp(); if (b) { I.world.sync(S.plots); welcomeBack(b); } return; }
+      const se = I.net.season;
+      if (se && se.seed !== S.seed) {
+        // 서버 시즌의 매장량·신호로 바꾼다 (구획 번호·위치는 시드와 무관하게 같다)
+        const fresh = I.island.generate(C.ISLAND_SEED, se.seed);
+        S.plots.forEach((p, i) => { const f = fresh[i]; p.reserve = f.reserve; p.signal = f.signal; p.mined = 0; p.regen = 0; p.dug = 0; });
+        S.seed = se.seed;
+        S.log = [];
+        jackpot = I.island.jackpotLine(S.plots);
+        I.net.poll(); // 주인 다시 받기 (위에서 지운 것 없음: 매장량만 바꿈)
+      }
+      S.over = false;
+      I.world.resync(S.plots);
+      $('#btnReset').hidden = true; // 공유 섬은 혼자 처음부터 다시 할 수 없다
+      I.state.save(S);
+      hud(); panel();
+      track('shared_join', { lots: I.guard.mine(S).length });
+    });
   }
 
   document.addEventListener('DOMContentLoaded', init);

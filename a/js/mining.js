@@ -44,7 +44,7 @@
       if (amt <= 0) continue;
       p.dug += amt;
       if (p.owner === 'me') state.me.tokens += amt;
-      else state.rivals[p.owner].tokens += amt;
+      else if (state.rivals && state.rivals[p.owner]) state.rivals[p.owner].tokens += amt; // 다른 플레이어('p:…') 몫은 서버가 센다
     }
   }
 

@@ -64,6 +64,27 @@
     });
     plots.reduce((a, b) => (b.reserve > a.reserve ? b : a)).reserve += C.TOTAL_TOKENS - total;
 
+    // 칸을 LOT_SPLIT×LOT_SPLIT 구획으로 쪼갠다 (섬 모양·지형은 칸 단위 그대로, 소유는 구획 단위)
+    // 구획 매장량 = 칸 매장량을 무작위 비율로 나눔 (칸 합계는 그대로 → 섬 전체 합계도 그대로)
+    const L = C.LOT_SPLIT || 1;
+    if (L > 1) {
+      const lots = [];
+      plots.forEach((c, ci) => {
+        const w = [];
+        for (let q = 0; q < L * L; q++) w.push(0.5 + t());
+        const sw = w.reduce((a, b) => a + b, 0);
+        let used = 0;
+        for (let q = 0; q < L * L; q++) {
+          const reserve = q === L * L - 1 ? c.reserve - used : Math.floor((c.reserve * w[q]) / sw);
+          used += reserve;
+          lots.push({ x: c.x, y: c.y, q, cell: ci + 1, fx: c.x * L + (q % L), fy: c.y * L + Math.floor(q / L), terrain: c.terrain, reserve });
+        }
+      });
+      lots.sort((a, b) => a.fy - b.fy || a.fx - b.fx);
+      plots.length = 0;
+      plots.push(...lots);
+    }
+
     // 탐사 신호 1~5: 매장량 순위 기반 + 오차
     const order = plots.map((p, k) => k).sort((a, b) => plots[a].reserve - plots[b].reserve);
     order.forEach((k, rank) => {

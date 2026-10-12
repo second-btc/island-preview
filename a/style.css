@@ -237,7 +237,9 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .hero .tagline { margin-top: 16px; opacity: 0; animation: storyIn 1.2s ease 3.8s forwards; }
 @keyframes storyIn { from { opacity: 0; transform: translateY(8px); filter: blur(4px); } to { opacity: 1; transform: none; filter: none; } }
 
-.pill.time { font-size: 13px; white-space: nowrap; }
+.pill.time { font-size: 13px; white-space: nowrap; cursor: pointer; user-select: none; }
+.pill.time:hover { filter: brightness(1.2); }
+.pill.time.fixed { border-color: rgba(255, 215, 120, .7); box-shadow: 0 0 0 1px rgba(255, 215, 120, .35) inset; }
 @media (max-width: 760px) { .pill.time { display: none; } }
 
 #btnReset { white-space: nowrap; }
@@ -487,3 +489,27 @@ button:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
 .crate-hint b { color: var(--gold); font-variant-numeric: tabular-nums; }
 .ch-arrow { display: inline-block; margin-left: 4px; color: var(--gold); font-weight: 800; }
 @media (max-width: 760px) { .walking .crate-hint:not([hidden]) { top: 112px; font-size: 12px; } } /* 모바일: 위쪽 조작 안내 밑에 */
+
+/* 낙하 지점: 지도에서 누른 자리 위에 떠서 따라다닌다 (left/top 0 기준, main.js가 transform으로 옮김) */
+.drop-pin { position: absolute; left: 0; top: 0; pointer-events: none; will-change: transform; }
+.hud > .drop-pin { pointer-events: none; }
+.drop-pin[hidden] { display: none; }
+.drop-pin .btn { position: absolute; left: var(--dx, 0px); bottom: 34px; transform: translateX(-50%); pointer-events: auto; white-space: nowrap; padding: 9px 15px; font-size: 14px; animation: dropIn .25s ease; }
+.drop-pin.below .btn { bottom: auto; top: 30px; }
+.drop-pin.below .drop-stem { bottom: auto; top: 4px; height: 24px; background: linear-gradient(rgba(255, 255, 255, .25), rgba(255, 255, 255, .9)); }
+.drop-pin.below .drop-stem::after { bottom: auto; top: -8px; }
+.drop-stem { position: absolute; left: -1px; bottom: 4px; width: 2px; height: 30px; background: linear-gradient(rgba(255, 255, 255, .9), rgba(255, 255, 255, .25)); pointer-events: none; }
+.drop-stem::after { content: ''; position: absolute; left: -5px; bottom: -8px; width: 8px; height: 8px; border: 2px solid #fff; border-radius: 50%; box-shadow: 0 0 10px rgba(255, 255, 255, .8); animation: dropPulse 1.4s ease-out infinite; }
+@keyframes dropIn { from { opacity: 0; transform: translate(-50%, 6px); } to { opacity: 1; transform: translate(-50%, 0); } }
+@keyframes dropPulse { 0% { transform: scale(.7); opacity: 1; } 100% { transform: scale(2.1); opacity: 0; } }
+
+/* 걷기 카드 맨 위: 물속 상태 */
+.wh-state { display: inline-block; margin-bottom: 8px; padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 700; color: #dff6ff; background: rgba(60, 150, 190, .35); border: 1px solid rgba(140, 210, 240, .45); }
+
+/* 임대 */
+.rent-box, .rent-set { margin-top: 10px; padding: 10px 12px; border-radius: 12px; background: rgba(255, 255, 255, .05); border: 1px solid rgba(255, 255, 255, .1); }
+.rent-box .btn.big { margin-top: 8px; }
+.rs-row { display: flex; flex-direction: column; gap: 4px; margin: 8px 0; font-size: 13px; }
+.rs-row span { display: flex; justify-content: space-between; }
+.rs-row input[type=range] { width: 100%; accent-color: #ffd34d; }
+.rent-set .btn { margin-top: 6px; width: 100%; }

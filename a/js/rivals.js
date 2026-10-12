@@ -2,8 +2,21 @@
 (function (I) {
   const C = I.config;
 
+  // 다른 플레이어('p:코드')는 코드로 정한 색·이름 (내 금색·무리 색과 겹치지 않는 차분한 색 고리)
+  const PLAYER_HUES = ['#5fd0a8', '#e58fd0', '#9fcf4a', '#f0a868', '#7fb8ff', '#d9c46a', '#c58cff', '#6fd7e8', '#ff8f8f', '#b7e07a'];
+  const pcache = new Map();
   function byId(id) {
-    return C.RIVALS.find((r) => r.id === id);
+    const r = C.RIVALS.find((q) => q.id === id);
+    if (r) return r;
+    if (typeof id === 'string' && id.startsWith('p:')) {
+      if (!pcache.has(id)) {
+        let h = 0;
+        for (const ch of id) h = (h * 31 + ch.charCodeAt(0)) | 0;
+        pcache.set(id, { id, name: '생존자 ' + id.slice(2), color: PLAYER_HUES[Math.abs(h) % PLAYER_HUES.length], player: true });
+      }
+      return pcache.get(id);
+    }
+    return { id, name: '누군가', color: '#aaaaaa' };
   }
 
   // 점령이 일어나면 { rival, plot, raid } 반환 (raid: 내 무방비 땅을 빼앗음)
